@@ -1,10 +1,10 @@
 # CLAUDE.md — Project Conventions
 
 ## Build & Run Commands
-- Activate environment: `source venv/bin/activate`
-- Run main script: `python main.py`
-- Install dependencies: `pip install -r requirements.txt`
-- Check syntax: `python -m py_compile main.py`
+- Run main script: `venv/bin/python main.py`
+- Install dependencies: `venv/bin/pip install -r requirements.txt`
+- Check syntax: `venv/bin/python -m py_compile main.py`
+- Run script with profiles: `venv/bin/python main.py --profile tech` or `venv/bin/python main.py --profile fun`
 
 ## Python Style Guidelines
 - **Type hints**: All function signatures must include type hints.
@@ -15,6 +15,11 @@
 
 ## Project Architecture
 - **Modular fetchers**: All scrapers/API clients must reside in `fetchers/` and inherit from `BaseEventFetcher`.
+- **Profile-driven fetcher loading**: `ACTIVE_FETCHERS` is NOT a static global. It is dynamically
+  assembled at runtime by `load_profile_config()` based on the `--profile` argument:
+  - `tech` profile → `[LumaFetcher()]`
+  - `fun` profile  → `[ChanCentreFetcher()]`
+  Adding a fetcher to a profile means updating `load_profile_config()` in `main.py`, not a top-level list.
 - **Environment**: Sensitive keys must only be read from `.env` via `os.getenv`. Never hardcode credentials.
 
 ## LLM Configuration
@@ -39,3 +44,8 @@
   - **Part A — Curated Events**: LLM-filtered events with summaries.
   - **Part B — System Diagnostics**: fetcher success/failure stats.
 - Keep language professional and concise. English only.
+
+## Testing & Validation
+- **Fetcher tests**: Every new fetcher must include a basic parsing test using a mock HTML snippet (or mock JSON payload for API-based fetchers). Place tests in `tests/test_<fetcher_name>.py`.
+- **Threshold check**: If a fetcher returns 0 events after a successful HTTP response, it must be flagged as a potential failure (`⚠️ 0 events — possible scraping breakage`) in the Part B diagnostics block, distinct from a hard error.
+- **Recall transparency**: Log and display both the raw event count (all fetched events before geo/date filtering) and the post-filter count so regressions in recall are immediately visible in Slack diagnostics.
