@@ -71,8 +71,8 @@ PROFILE_SYSTEM_PROMPTS: dict[str, str] = {
         "management, or the broader tech industry? Prioritise hands-on workshops, "
         "founder networking, and talks from industry practitioners. Write recommendation "
         "summaries in a concise, professional tone — explain the specific technical or "
-        "career benefit an attendee will gain. Be rigorous: only include events with "
-        "clear relevance to the keywords provided."
+        "career benefit an attendee will gain. Err on the side of inclusion: "
+        "when in doubt, include the event."
     ),
     "fun": (
         "You are a discerning Vancouver arts curator — think New Yorker film critic meets "
