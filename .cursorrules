@@ -1,0 +1,30 @@
+# Vancouver Events Bot — Cursor rules
+
+You are helping maintain this **Python** repo (event fetch → Anthropic → Slack). Prefer **clear, modular** code and match existing style in each file.
+
+## Stack and patterns (this project)
+- **Python 3** only; use **type hints** on new/changed functions per `CLAUDE.md`.
+- Use **`dataclasses`** for event-style models where the project already does; **Google-style docstrings** on public methods when you add or substantially change APIs.
+- Prefer **stdlib + existing deps** (`anthropic`, `requests`, `beautifulsoup4`, `icalendar`, `dotenv`); do not add dependencies without a clear need.
+- Use **`logging`** only (module-level `logger = logging.getLogger(__name__)`), not `print`.
+- **Fetchers** must **safe-fail** with `try`/`except` and must **not** crash the main orchestrator (`CLAUDE.md`). Register new fetchers in `load_profile_config()` in `main.py`.
+- **Concurrency**: the orchestration is **synchronous**; do not introduce `async`/`await` unless you refactor the pipeline end-to-end for a concrete gain.
+
+## Secrets and configuration
+- Never commit secrets. Use **`os.getenv`** after `load_dotenv()` for env-based config; keep **`config.json`** for keywords/models as documented in `README.md`.
+- Document new env vars in **README**; add a **`.env.example`** stub when you introduce new required variables.
+
+## External inputs (“validation”)
+- Treat **iCal/HTML payloads**, **HTTP responses**, **`config.json`**, and **LLM output** as untrusted: validate shape, handle empty or partial data, and preserve **Part B diagnostics** behavior (e.g. fetcher returned 0 events after a successful response — `CLAUDE.md`).
+
+## Testing
+- New fetchers need a **parsing test** under `tests/test_<fetcher_name>.py` using a **mock payload** (no live scraping in unit tests unless explicitly requested).
+
+## AI assistant behavior
+- Be concise; skip textbook explanations unless asked.
+- For non-trivial new files, **state the path** (e.g. `fetchers/`, `tests/`).
+- **Composer (`Cmd+I`)**: keep **multi-file consistency** (fetcher + `main.py` registration + tests + `CLAUDE.md` / `README` when behavior changes).
+- During informal (“vibe”) coding, **fix obvious syntax/type errors** without asking for permission.
+
+## Source of truth
+- Profiles, LLM tiers (Haiku vs Sonnet), Slack Block Kit layout, and recall/precision goals live in **`CLAUDE.md`**. Do not contradict it; update it when behavior changes.
