@@ -1,132 +1,125 @@
 """
-Luma event fetcher for lu.ma/vancouver.
+Luma event fetcher for the Vancouver discovery feed.
 
-Uses Playwright (headless Chromium) to navigate to lu.ma/vancouver,
-obtain Cloudflare clearance cookies, then calls Luma's internal discovery
-API from within the browser's JS context so the requests inherit those
-cookies and are not blocked.
+Uses Luma's official iCal subscription endpoint — no API key required and
+no bot-detection issues (unlike the reverse-engineered discovery API).
 """
 
 import logging
-import os
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import sync_playwright
+import requests
+from icalendar import Calendar
 
 from .base import BaseEventFetcher, Event
 
 logger = logging.getLogger(__name__)
 
+_ICAL_URL = (
+    "https://api2.luma.com/ics/get?entity=discover&id=discplace-4fa7ldlAkBTTivm"
+)
 _VANCOUVER_TZ = ZoneInfo("America/Vancouver")
-_EVENT_BASE = "https://lu.ma"
 
-# Cities included in the digest. Online events are always included.
-# "University Endowment Lands" is the official municipality name for UBC.
-_ALLOWED_CITIES = {
-    "Vancouver",
-    "Burnaby",
-    "Richmond",
-    "University Endowment Lands",
-    "North Vancouver",
-    "West Vancouver",
-    "Surrey",
-    "Coquitlam",
-    "New Westminster",
-    "Port Coquitlam",
-    "Port Moody",
-    "Maple Ridge",
-    "Langley",
-    "Delta",
-    "Pitt Meadows",
-    "Lions Bay",
-}
+# Bounding box for Metro Vancouver (excludes Nanaimo, Victoria, Whistler, etc.)
+_LAT_MIN, _LAT_MAX = 49.0, 49.45
+_LON_MIN, _LON_MAX = -123.3, -122.2
 
 
-def _is_in_coverage_area(event: dict) -> bool:
-    """Return True if the event is in an allowed city or is online.
+def _in_metro_vancouver(geo) -> bool:
+    """Return True if a GEO value falls within the Metro Vancouver bounding box.
 
     Args:
-        event: The event object from the Luma API.
+        geo: The vGeo component from an iCal VEVENT, or None.
 
     Returns:
-        True if the event should be included, False if it should be skipped.
+        True if in range or if geo data is absent (pass-through).
     """
-    if event.get("location_type") == "online":
-        return True
-    geo: dict = event.get("geo_address_info") or {}
-    city = geo.get("city", "")
-    return city in _ALLOWED_CITIES
+    if geo is None:
+        return True  # no coords — pass through, feed is already Vancouver-scoped
+    try:
+        lat = float(geo.latitude)
+        lon = float(geo.longitude)
+        return _LAT_MIN <= lat <= _LAT_MAX and _LON_MIN <= lon <= _LON_MAX
+    except Exception:
+        return True  # unparseable — pass through
 
 
-def _extract_text_from_mirror(doc: dict) -> str:
-    """Extract plain text from Luma's description_mirror rich-text document.
+def _extract_url(description: str) -> str:
+    """Pull the canonical event URL out of the iCal DESCRIPTION field.
+
+    Luma embeds it as the first line: "Get up-to-date information at: <url>"
 
     Args:
-        doc: The description_mirror dict returned by the event detail endpoint.
+        description: Raw DESCRIPTION string from the VEVENT.
 
     Returns:
-        A plain-text string with whitespace normalised.
+        The luma.com URL, or an empty string if not found.
     """
-    if not doc or not isinstance(doc, dict):
-        return ""
-
-    parts: list[str] = []
-
-    def _traverse(node: dict) -> None:
-        if node.get("type") == "text":
-            parts.append(node.get("text", ""))
-        for child in node.get("content", []):
-            _traverse(child)
-        if node.get("type") in ("paragraph", "heading", "listItem", "blockquote"):
-            parts.append(" ")
-
-    _traverse(doc)
-    return " ".join("".join(parts).split()).strip()
+    m = re.search(r"https://luma\.com/\S+", description)
+    return m.group(0) if m else ""
 
 
-def _parse_location(event: dict) -> str:
-    """Build a human-readable location string from an event dict.
+def _extract_description_body(description: str) -> str:
+    """Strip the Luma boilerplate header and return just the event body text.
+
+    The DESCRIPTION field has this structure:
+        Get up-to-date information at: <url>
+
+        Address:
+        <address lines>
+
+        <actual description>
+
+        Hosted by <name>
 
     Args:
-        event: The event object returned by the discovery or detail endpoint.
+        description: Raw DESCRIPTION string from the VEVENT.
 
     Returns:
-        A location string suitable for display in the Slack digest.
+        The event body text with whitespace normalised.
     """
-    location_type = event.get("location_type", "")
+    # Drop everything up to and including the Address block.
+    body = re.split(r"Address:\n.*?\n\n", description, maxsplit=1, flags=re.DOTALL)
+    text = body[-1]  # everything after the address block (or full text if no match)
 
-    if location_type == "online":
-        return "Online (Virtual)"
+    # Drop trailing "Hosted by …" line.
+    text = re.sub(r"\s*Hosted by .+$", "", text, flags=re.DOTALL)
 
-    geo: dict = event.get("geo_address_info") or {}
-    mode = geo.get("mode", "")
+    # Normalise Luma's escaped newlines and extra whitespace.
+    text = text.replace("\\n", " ").strip()
+    return " ".join(text.split())
 
-    if mode == "shown":
-        return (
-            geo.get("full_address")
-            or geo.get("short_address")
-            or geo.get("city_state", "Vancouver, BC")
-        )
 
-    if mode == "obfuscated":
-        city_state = geo.get("city_state") or geo.get("city", "Vancouver") + ", BC"
-        return f"{city_state} (address shown after RSVP)"
+def _parse_location(vevent) -> str:
+    """Return a human-readable location string from a VEVENT.
 
-    return "Vancouver, BC"
+    Falls back gracefully when the address is obfuscated (Luma replaces it
+    with the event URL).
+
+    Args:
+        vevent: An icalendar VEVENT component.
+
+    Returns:
+        A location string for display.
+    """
+    loc = str(vevent.get("LOCATION", ""))
+    if loc.startswith("https://"):
+        return "Vancouver, BC (address shown after RSVP)"
+    return loc or "Vancouver, BC"
 
 
 class LumaFetcher(BaseEventFetcher):
-    """Fetches events from lu.ma/vancouver via headless Chromium + Playwright."""
+    """Fetches events from the lu.ma/vancouver iCal subscription feed."""
 
     name = "Luma"
 
     def fetch_events(self, start_date: date, end_date: date) -> list[Event]:
         """Fetch Vancouver Luma events between start_date and end_date (inclusive).
 
-        Launches a headless browser, navigates to lu.ma/vancouver to obtain
-        Cloudflare clearance, then paginates the discovery API from within the
-        browser's JS context.
+        Downloads the iCal feed, filters by date window and Metro Vancouver
+        bounding box, and returns structured Event objects.
 
         Args:
             start_date: First day of the range (inclusive).
@@ -145,155 +138,69 @@ class LumaFetcher(BaseEventFetcher):
         )
 
         try:
-            return self._fetch_with_playwright(start_boundary, end_boundary, start_date, end_date)
+            resp = requests.get(_ICAL_URL, timeout=15)
+            resp.raise_for_status()
+            cal = Calendar.from_ical(resp.content)
         except Exception as exc:
-            logger.error("[Luma] Playwright fetch failed: %s", exc)
+            logger.error("[Luma] Failed to fetch iCal feed: %s", exc)
             self.raw_count = 0
             return []
 
-    def _fetch_with_playwright(
-        self,
-        start_boundary: datetime,
-        end_boundary: datetime,
-        start_date: date,
-        end_date: date,
-    ) -> list[Event]:
-        """Run the Playwright browser session and return parsed events."""
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/123.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-            )
-            page = context.new_page()
+        events: list[Event] = []
+        raw: int = 0
 
-            # Mask navigator.webdriver to avoid Cloudflare bot detection.
-            page.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
+        for component in cal.walk():
+            if component.name != "VEVENT":
+                continue
 
-            logger.debug("[Luma] Navigating to lu.ma/vancouver to obtain CF clearance...")
-            page.goto("https://lu.ma/vancouver", wait_until="networkidle", timeout=30000)
+            dtstart = component.get("DTSTART")
+            if dtstart is None:
+                continue
 
-            events: list[Event] = []
-            raw: int = 0
-            cursor: str | None = None
-            page_num: int = 0
-            stop_paginating: bool = False
+            dt = dtstart.dt
+            # iCal dates can be date-only (all-day) or datetime.
+            if isinstance(dt, date) and not isinstance(dt, datetime):
+                dt = datetime(dt.year, dt.month, dt.day, 0, 0, 0,
+                              tzinfo=_VANCOUVER_TZ)
+            elif dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_VANCOUVER_TZ)
+            else:
+                dt = dt.astimezone(_VANCOUVER_TZ)
 
-            while not stop_paginating:
-                page_num += 1
+            if not (start_boundary <= dt <= end_boundary):
+                continue
 
-                # Call the discovery API from within the browser's JS context
-                # so Cloudflare clearance cookies are included automatically.
-                data = page.evaluate(
-                    """async (cursor) => {
-                        const params = new URLSearchParams({
-                            discover_page: 'vancouver',
-                            pagination_limit: '50',
-                        });
-                        if (cursor) params.set('pagination_cursor', cursor);
-                        const resp = await fetch(
-                            'https://api.lu.ma/discover/get-paginated-events?' + params,
-                            { headers: { 'accept': 'application/json' } }
-                        );
-                        return resp.json();
-                    }""",
-                    cursor,
+            raw += 1
+
+            if not _in_metro_vancouver(component.get("GEO")):
+                logger.debug(
+                    "[Luma] Skipping out-of-area event: %s (geo=%s)",
+                    component.get("SUMMARY"), component.get("GEO"),
                 )
+                continue
 
-                entries: list[dict] = data.get("entries", [])
-                has_more: bool = data.get("has_more", False)
-                cursor = data.get("next_cursor")
+            title = str(component.get("SUMMARY", "Untitled Event"))
+            description_raw = str(component.get("DESCRIPTION", ""))
+            url = _extract_url(description_raw)
+            description = _extract_description_body(description_raw)
+            location = _parse_location(component)
 
-                for entry in entries:
-                    event_data: dict = entry.get("event", {})
-                    start_at: str = event_data.get("start_at", "")
-                    if not start_at:
-                        continue
+            date_str = dt.strftime("%Y-%m-%d")
+            hour = dt.strftime("%I").lstrip("0") or "12"
+            time_str = hour + dt.strftime(":%M %p")
 
-                    try:
-                        dt_utc = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
-                        tz_name = event_data.get("timezone") or "America/Vancouver"
-                        dt_local = dt_utc.astimezone(ZoneInfo(tz_name))
-                    except Exception as exc:
-                        logger.debug("[Luma] Could not parse datetime '%s': %s", start_at, exc)
-                        continue
-
-                    if dt_local > end_boundary:
-                        stop_paginating = True
-                        break
-
-                    if dt_local < start_boundary:
-                        continue
-
-                    raw += 1
-
-                    if not _is_in_coverage_area(event_data):
-                        logger.debug(
-                            "[Luma] Skipping out-of-area event: %s (%s)",
-                            event_data.get("name"),
-                            (event_data.get("geo_address_info") or {}).get("city", "unknown"),
-                        )
-                        continue
-
-                    # Fetch event description via browser JS context.
-                    api_id = event_data.get("api_id", "")
-                    description = ""
-                    if api_id:
-                        try:
-                            detail = page.evaluate(
-                                """async (api_id) => {
-                                    const resp = await fetch(
-                                        'https://api.lu.ma/event/get?event_api_id=' + api_id + '&series_mode=next_only',
-                                        { headers: { 'accept': 'application/json' } }
-                                    );
-                                    return resp.json();
-                                }""",
-                                api_id,
-                            )
-                            mirror = detail.get("description_mirror")
-                            if mirror:
-                                description = _extract_text_from_mirror(mirror)
-                        except Exception as exc:
-                            logger.debug("[Luma] Could not fetch description for %s: %s", api_id, exc)
-
-                    if not description:
-                        cal: dict = entry.get("calendar") or {}
-                        description = cal.get("description_short") or ""
-
-                    url_slug = event_data.get("url", "")
-                    event_url = f"{_EVENT_BASE}/{url_slug}"
-                    location = _parse_location(event_data)
-                    date_str = dt_local.strftime("%Y-%m-%d")
-                    hour = dt_local.strftime("%I").lstrip("0") or "12"
-                    time_str = hour + dt_local.strftime(":%M %p")
-
-                    events.append(
-                        Event(
-                            title=event_data.get("name", "Untitled Event"),
-                            date=date_str,
-                            time=time_str,
-                            location=location,
-                            description=description,
-                            url=event_url,
-                            source=self.name,
-                            tags=[],
-                        )
-                    )
-
-                if not has_more or not cursor:
-                    break
-
-            browser.close()
+            events.append(
+                Event(
+                    title=title,
+                    date=date_str,
+                    time=time_str,
+                    location=location,
+                    description=description,
+                    url=url,
+                    source=self.name,
+                    tags=[],
+                )
+            )
 
         self.raw_count = raw
         logger.info(
