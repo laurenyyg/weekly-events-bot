@@ -467,7 +467,8 @@ def format_slack_message(
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f":robot_face: Filtered by `{model}`"}
+                {"type": "mrkdwn", "text": f":robot_face: Filtered by `{model}`"},
+                {"type": "mrkdwn", "text": ":information_source: Events sourced from Luma's curated iCal feed — check <https://lu.ma/vancouver|lu.ma/vancouver> manually for completeness."},
             ],
         }
     )
