@@ -166,6 +166,14 @@ class FilteredEvent:
     summary: str       # LLM-generated recommendation
 
 
+@dataclass
+class LLMUsage:
+    model_id: str
+    total_tokens: int
+    max_tokens: int
+    budget_hit: bool
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Compute the upcoming week (Monday – Sunday)
 # ---------------------------------------------------------------------------
@@ -218,6 +226,9 @@ def run_fetchers(
 def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
     """Build the user-turn prompt for the LLM filtering step.
 
+    Only the fields needed for relevance judgment are included (title, description,
+    tags). All other fields are stripped to reduce input token cost.
+
     Args:
         events:   All candidate events to be evaluated.
         keywords: The profile-specific keywords to match against.
@@ -225,7 +236,11 @@ def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
     Returns:
         A formatted prompt string ready to be sent as the user message.
     """
-    events_json = json.dumps([e.to_dict() for e in events], indent=2)
+    slim_events = [
+        {"title": e.title, "description": e.description, "tags": e.tags}
+        for e in events
+    ]
+    events_json = json.dumps(slim_events, indent=2)
     keywords_str = ", ".join(f'"{k}"' for k in keywords)
 
     return f"""Your task:
@@ -236,11 +251,6 @@ def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
    why someone interested in those topics should attend.
 4. Return a JSON array. Include ONLY relevant events. Each object must have:
    - "title": string (exact title from input)
-   - "date": string (exact date from input)
-   - "time": string
-   - "location": string
-   - "url": string
-   - "source": string
    - "summary": string (your recommendation)
 
 Respond with ONLY the JSON array, no markdown fences, no extra text.
@@ -249,13 +259,97 @@ Events:
 {events_json}"""
 
 
+_MAX_TOKENS = 32768
+_SUMMARY_MAX_TOKENS = 8192
+
+
+def _matches_any_keyword(event: Event, keywords: list[str]) -> bool:
+    """Return True if any keyword appears verbatim in the event's text fields.
+
+    Args:
+        event:    The event to check.
+        keywords: Keywords to match against.
+
+    Returns:
+        True if at least one keyword is found (case-insensitive).
+    """
+    haystack = f"{event.title} {event.description} {' '.join(event.tags)}".lower()
+    return any(kw.lower() in haystack for kw in keywords)
+
+
+def build_summary_prompt(events: list[Event]) -> str:
+    """Build a summary-only prompt for events whose relevance is already confirmed.
+
+    Args:
+        events: Events that passed the keyword pre-filter.
+
+    Returns:
+        A prompt string asking the LLM only to write summaries, not to filter.
+    """
+    slim_events = [
+        {"title": e.title, "description": e.description, "tags": e.tags}
+        for e in events
+    ]
+    return f"""These events are already confirmed relevant. For each, write a one- or two-sentence recommendation explaining why someone interested should attend.
+
+Return a JSON array where each object has:
+- "title": string (exact title from input)
+- "summary": string (your recommendation)
+
+Respond with ONLY the JSON array, no markdown fences, no extra text.
+
+Events:
+{json.dumps(slim_events, indent=2)}"""
+
+
+def _parse_llm_json(raw_text: str) -> list[dict] | None:
+    """Strip markdown fences and parse the LLM's JSON response.
+
+    Args:
+        raw_text: Raw text content from the LLM response.
+
+    Returns:
+        Parsed list of dicts, or None on parse failure.
+    """
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("```", 2)[1]
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:]
+        raw_text = raw_text.strip()
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        log.error("LLM returned invalid JSON: %s\nRaw output:\n%s", exc, raw_text)
+        return None
+
+
+def _build_filtered_events(parsed: list[dict], source_events: list[Event]) -> list[FilteredEvent]:
+    """Match LLM output items back to original Event objects.
+
+    Args:
+        parsed:       List of dicts with 'title' and 'summary' keys from LLM.
+        source_events: The original events that were sent to the LLM.
+
+    Returns:
+        List of FilteredEvent, skipping any titles the LLM hallucinated.
+    """
+    result: list[FilteredEvent] = []
+    for item in parsed:
+        original = next((e for e in source_events if e.title == item.get("title")), None)
+        if original is None:
+            log.warning("LLM returned unknown event title: %s", item.get("title"))
+            continue
+        result.append(FilteredEvent(event=original, summary=item.get("summary", "")))
+    return result
+
+
 def filter_events_with_llm(
     events: list[Event],
     keywords: list[str],
     profile: str,
     api_key: str,
     model: str,
-) -> tuple[list[FilteredEvent], str]:
+) -> tuple[list[FilteredEvent], str, LLMUsage]:
     """Filter events using an Anthropic LLM with a profile-specific system prompt.
 
     Args:
@@ -266,10 +360,11 @@ def filter_events_with_llm(
         model:    Model ID to use for filtering.
 
     Returns:
-        A (filtered_events, model_id) tuple.
+        A (filtered_events, model_id, llm_usage) tuple.
     """
     if not events:
-        return [], ""
+        empty_usage = LLMUsage(model_id=model, total_tokens=0, max_tokens=_MAX_TOKENS, budget_hit=False)
+        return [], "", empty_usage
 
     # Opus supports adaptive thinking; all other models require explicit budget.
     thinking = (
@@ -279,49 +374,85 @@ def filter_events_with_llm(
     )
 
     client = anthropic.Anthropic(api_key=api_key)
-    system_prompt = PROFILE_SYSTEM_PROMPTS[profile]
-    prompt = build_filter_prompt(events, keywords)
 
-    log.info("Sending %d event(s) to LLM for filtering (profile=%s, model=%s)...", len(events), profile, model)
+    # Cache the system prompt — saves input tokens on the second API call.
+    cached_system: list[dict] = [
+        {
+            "type": "text",
+            "text": PROFILE_SYSTEM_PROMPTS[profile],
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
 
-    with client.messages.stream(
-        model=model,
-        max_tokens=32768,
-        system=system_prompt,
-        thinking=thinking,
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        response = stream.get_final_message()
-
-    raw_text = next(
-        (block.text for block in response.content if block.type == "text"), ""
-    ).strip()
-
-    log.debug("LLM raw response:\n%s", raw_text)
-
-    # Strip markdown code fences if the LLM wraps the output in ```json ... ```
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```", 2)[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
-
-    try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        log.error("LLM returned invalid JSON: %s\nRaw output:\n%s", exc, raw_text)
-        return [], model
+    # Stage 1: keyword pre-filter — split into confirmed-relevant vs ambiguous.
+    keyword_matched = [e for e in events if _matches_any_keyword(e, keywords)]
+    unmatched = [e for e in events if not _matches_any_keyword(e, keywords)]
+    log.info(
+        "Pre-filter: %d keyword-matched (summary only), %d unmatched (LLM filter).",
+        len(keyword_matched), len(unmatched),
+    )
 
     filtered: list[FilteredEvent] = []
-    for item in parsed:
-        original = next((e for e in events if e.title == item.get("title")), None)
-        if original is None:
-            log.warning("LLM returned unknown event title: %s", item.get("title"))
-            continue
-        filtered.append(FilteredEvent(event=original, summary=item.get("summary", "")))
+    resolved_model = model
+    total_input = 0
+    total_output = 0
+    budget_hit = False
+
+    # Stage 2a: summary-only call for keyword-matched events (no thinking needed).
+    if keyword_matched:
+        log.info("Requesting summaries for %d pre-matched event(s)...", len(keyword_matched))
+        with client.messages.stream(
+            model=model,
+            max_tokens=_SUMMARY_MAX_TOKENS,
+            system=cached_system,
+            messages=[{"role": "user", "content": build_summary_prompt(keyword_matched)}],
+        ) as stream:
+            resp = stream.get_final_message()
+        resolved_model = resp.model
+        total_input += resp.usage.input_tokens
+        total_output += resp.usage.output_tokens
+        budget_hit |= resp.usage.output_tokens >= _SUMMARY_MAX_TOKENS
+
+        raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+        log.debug("Summary response:\n%s", raw_text)
+        parsed = _parse_llm_json(raw_text)
+        if parsed is not None:
+            filtered.extend(_build_filtered_events(parsed, keyword_matched))
+
+    # Stage 2b: filter+summary call for unmatched events (with thinking).
+    if unmatched:
+        log.info(
+            "Sending %d unmatched event(s) to LLM for filtering (profile=%s, model=%s)...",
+            len(unmatched), profile, model,
+        )
+        with client.messages.stream(
+            model=model,
+            max_tokens=_MAX_TOKENS,
+            system=cached_system,
+            thinking=thinking,
+            messages=[{"role": "user", "content": build_filter_prompt(unmatched, keywords)}],
+        ) as stream:
+            resp = stream.get_final_message()
+        resolved_model = resp.model
+        total_input += resp.usage.input_tokens
+        total_output += resp.usage.output_tokens
+        budget_hit |= resp.usage.output_tokens >= _MAX_TOKENS
+
+        raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+        log.debug("Filter response:\n%s", raw_text)
+        parsed = _parse_llm_json(raw_text)
+        if parsed is not None:
+            filtered.extend(_build_filtered_events(parsed, unmatched))
+
+    llm_usage = LLMUsage(
+        model_id=resolved_model,
+        total_tokens=total_input + total_output,
+        max_tokens=_MAX_TOKENS,
+        budget_hit=budget_hit,
+    )
 
     log.info("LLM approved %d / %d event(s).", len(filtered), len(events))
-    return filtered, model
+    return filtered, resolved_model, llm_usage
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +467,7 @@ def format_slack_message(
     model: str,
     keywords: list[str],
     profile: str,
+    llm_usage: LLMUsage | None = None,
 ) -> dict:
     """Build a Slack Block Kit payload.
 
@@ -347,6 +479,7 @@ def format_slack_message(
         model:           Model ID used for filtering (shown in diagnostics).
         keywords:        Active keyword list (shown in Part A header).
         profile:         Active profile name (shown in digest header).
+        llm_usage:       Token usage metadata from the LLM call (shown in footer).
 
     Returns:
         A dict representing the Slack Block Kit payload.
@@ -463,15 +596,21 @@ def format_slack_message(
             }
         )
 
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f":robot_face: Filtered by `{model}`"},
-                {"type": "mrkdwn", "text": ":information_source: Events sourced from Luma's curated iCal feed — check <https://lu.ma/vancouver|lu.ma/vancouver> manually for completeness."},
-            ],
-        }
-    )
+    context_elements: list[dict] = [
+        {"type": "mrkdwn", "text": f":robot_face: Filtered by `{model}`"},
+        {"type": "mrkdwn", "text": ":information_source: Events sourced from Luma's curated iCal feed — check <https://lu.ma/vancouver|lu.ma/vancouver> manually for completeness."},
+    ]
+    if llm_usage:
+        budget_label = "Hit" if llm_usage.budget_hit else "OK"
+        context_elements.append({
+            "type": "mrkdwn",
+            "text": (
+                f"_Model: {llm_usage.model_id} | "
+                f"Tokens: {llm_usage.total_tokens:,}/{llm_usage.max_tokens:,} | "
+                f"Budget: {budget_label}_"
+            ),
+        })
+    blocks.append({"type": "context", "elements": context_elements})
 
     return {"blocks": blocks}
 
@@ -642,7 +781,7 @@ def main() -> None:
                 )
 
         # Step 2 — LLM filtering.
-        filtered_events, model = filter_events_with_llm(
+        filtered_events, model, llm_usage = filter_events_with_llm(
             all_events, keywords, profile, ANTHROPIC_API_KEY, model
         )
 
@@ -670,7 +809,7 @@ def main() -> None:
 
         # Step 3 — Build and send Slack message.
         slack_payload = format_slack_message(
-            filtered_events, fetcher_results, start_date, end_date, model, keywords, profile
+            filtered_events, fetcher_results, start_date, end_date, model, keywords, profile, llm_usage
         )
         post_to_slack(slack_payload, webhook_url)
 

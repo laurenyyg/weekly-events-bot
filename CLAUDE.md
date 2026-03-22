@@ -44,6 +44,10 @@
   - **Part A — Curated Events**: LLM-filtered events with summaries.
   - **Part B — System Diagnostics**: fetcher success/failure stats.
 - Keep language professional and concise. English only.
+- Every Slack post must include a metadata footer in the format:
+  ```
+  _Model: [model_id] | Tokens: [total_used]/[max_tokens] | Budget: [OK/Hit]_
+  ```
 
 ## Testing & Validation
 - **Fetcher tests**: Every new fetcher must include a basic parsing test using a mock HTML snippet (or mock JSON payload for API-based fetchers). Place tests in `tests/test_<fetcher_name>.py`.

@@ -5,8 +5,9 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 ## How it works
 
 1. **Fetchers** collect events from configured sources for the upcoming two-week window
-2. **LLM filtering** (Claude Opus) evaluates each event against profile-specific keywords and writes a one-sentence recommendation for each approved event
-3. **Slack digest** is posted in two parts: curated events (Part A) and system diagnostics (Part B)
+2. **Keyword pre-filter** — events with a verbatim keyword match in title, description, or tags are auto-included (summary-only LLM call, no thinking overhead)
+3. **LLM filtering** (Claude Sonnet by default) evaluates the remaining ambiguous events against profile-specific keywords with extended thinking enabled, and writes a one- or two-sentence recommendation for each approved event. The system prompt is cached across both LLM calls to reduce input token cost.
+4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B), and a metadata footer showing model ID, total tokens used, and whether the output budget was hit
 
 ## Profiles
 
