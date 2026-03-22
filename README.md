@@ -1,0 +1,51 @@
+# Vancouver Events Bot
+
+A weekly Slack digest of curated Vancouver events, filtered by an LLM for relevance.
+
+## How it works
+
+1. **Fetchers** collect events from configured sources for the upcoming two-week window
+2. **LLM filtering** (Claude Opus) evaluates each event against profile-specific keywords and writes a one-sentence recommendation for each approved event
+3. **Slack digest** is posted in two parts: curated events (Part A) and system diagnostics (Part B)
+
+## Profiles
+
+| Profile | Sources | Schedule | Slack channel |
+|---------|---------|----------|---------------|
+| `tech` | Luma iCal | Every Sunday 4:00 AM UTC (manual trigger) | Tech events |
+| `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 00:05 AM Vancouver time (bi-weekly) | Fun events |
+
+## Running locally
+
+```bash
+venv/bin/python main.py --profile tech
+venv/bin/python main.py --profile fun
+```
+
+## Configuration
+
+Keywords and model selection live in `config.json`:
+
+```json
+{
+  "tech_model": "claude-opus-4-6",
+  "tech_keywords": ["AI", "Machine Learning", "Startup", ...],
+  "fun_model": "claude-sonnet-4-6",
+  "fun_keywords": ["Film Noir", "Jazz", "Art House Cinema", ...]
+}
+```
+
+## Adding a new fetcher
+
+1. Create `fetchers/<name>_fetcher.py` inheriting from `BaseEventFetcher`
+2. Implement `fetch_events(start_date, end_date) -> list[Event]` with a try/except safe-fail
+3. Register it in `load_profile_config()` in `main.py`
+4. Add a parsing test in `tests/test_<name>.py`
+
+## Environment variables
+
+| Variable | Required by |
+|----------|------------|
+| `ANTHROPIC_API_KEY` | Both profiles |
+| `TECH_WEBHOOK_URL` | `tech` profile |
+| `FUN_WEBHOOK_URL` | `fun` profile |
