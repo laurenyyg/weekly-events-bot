@@ -103,15 +103,15 @@ def _load_keywords(profile: str) -> list[str]:
     return _CONFIG.get(f"{profile}_keywords", [])
 
 
-def load_profile_config(profile: str) -> tuple[str, list[str], list[BaseEventFetcher]]:
-    """Return (webhook_url, keywords, fetchers) for the given profile.
+def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEventFetcher]]:
+    """Return (webhook_url, model, keywords, fetchers) for the given profile.
 
     Args:
         profile: One of 'tech' or 'fun'.
 
     Returns:
-        A tuple of the Slack webhook URL, keyword list, and active fetchers
-        for the selected profile.
+        A tuple of the Slack webhook URL, model ID, keyword list, and active
+        fetchers for the selected profile.
 
     Raises:
         SystemExit: If the required webhook URL env var is not set.
@@ -124,6 +124,7 @@ def load_profile_config(profile: str) -> tuple[str, list[str], list[BaseEventFet
         fetchers = [ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]
 
     keywords = _load_keywords(profile)
+    model = _CONFIG.get(f"{profile}_model", "claude-sonnet-4-6")
 
     if not webhook_url:
         env_var = "TECH_WEBHOOK_URL" if profile == "tech" else "FUN_WEBHOOK_URL"
@@ -132,7 +133,7 @@ def load_profile_config(profile: str) -> tuple[str, list[str], list[BaseEventFet
         )
         sys.exit(1)
 
-    return webhook_url, keywords, fetchers
+    return webhook_url, model, keywords, fetchers
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +254,7 @@ def filter_events_with_llm(
     keywords: list[str],
     profile: str,
     api_key: str,
+    model: str,
 ) -> tuple[list[FilteredEvent], str]:
     """Filter events using an Anthropic LLM with a profile-specific system prompt.
 
@@ -261,6 +263,7 @@ def filter_events_with_llm(
         keywords: Profile-specific keywords to match against.
         profile:  Active profile name ('tech' or 'fun'); selects the system prompt.
         api_key:  Anthropic API key.
+        model:    Model ID to use for filtering.
 
     Returns:
         A (filtered_events, model_id) tuple.
@@ -268,18 +271,24 @@ def filter_events_with_llm(
     if not events:
         return [], ""
 
-    model = "claude-opus-4-6"
+    # Opus supports adaptive thinking; all other models require explicit budget.
+    thinking = (
+        {"type": "adaptive"}
+        if model.startswith("claude-opus")
+        else {"type": "enabled", "budget_tokens": 8000}
+    )
+
     client = anthropic.Anthropic(api_key=api_key)
     system_prompt = PROFILE_SYSTEM_PROMPTS[profile]
     prompt = build_filter_prompt(events, keywords)
 
-    log.info("Sending %d event(s) to LLM for filtering (profile=%s)...", len(events), profile)
+    log.info("Sending %d event(s) to LLM for filtering (profile=%s, model=%s)...", len(events), profile, model)
 
     with client.messages.stream(
         model=model,
         max_tokens=32768,
         system=system_prompt,
-        thinking={"type": "adaptive"},
+        thinking=thinking,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
         response = stream.get_final_message()
@@ -591,7 +600,7 @@ def main() -> None:
         sys.exit(1)
 
     # Load profile-specific config (exits on missing webhook).
-    webhook_url, keywords, active_fetchers = load_profile_config(profile)
+    webhook_url, model, keywords, active_fetchers = load_profile_config(profile)
 
     log.info("Starting run — profile=%s", profile)
 
@@ -620,7 +629,7 @@ def main() -> None:
 
         # Step 2 — LLM filtering.
         filtered_events, model = filter_events_with_llm(
-            all_events, keywords, profile, ANTHROPIC_API_KEY
+            all_events, keywords, profile, ANTHROPIC_API_KEY, model
         )
         log.info(
             "Recall: %d raw → %d LLM-approved (%.0f%%)",
