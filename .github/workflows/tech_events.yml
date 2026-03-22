@@ -2,7 +2,7 @@ name: Vancouver Tech Events (Weekly)
 
 on:
   schedule:
-    - cron: "50 1 * * 0"  # Every Sunday 01:50 UTC (Sat 6:50 PM PDT)
+    - cron: "0 4 * * 0"  # Every Sunday 04:00 UTC (Sat 9:00 PM PDT)
   workflow_dispatch:
 
 jobs:
