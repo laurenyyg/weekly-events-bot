@@ -13,8 +13,8 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 
 | Profile | Sources | Schedule | Slack channel |
 |---------|---------|----------|---------------|
-| `tech` | Luma iCal | Every Sunday 4:00 AM UTC (manual trigger) | Tech events |
-| `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 00:05 AM Vancouver time (bi-weekly) | Fun events |
+| `tech` | Luma iCal | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
+| `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 08:05 UTC (Sun 00:05 PST / 01:05 PDT) — even weeks only, manual trigger also available | Fun events |
 
 ## Running locally
 
@@ -29,7 +29,7 @@ Keywords and model selection live in `config.json`:
 
 ```json
 {
-  "tech_model": "claude-opus-4-6",
+  "tech_model": "claude-sonnet-4-6",
   "tech_keywords": ["AI", "Machine Learning", "Startup", ...],
   "fun_model": "claude-sonnet-4-6",
   "fun_keywords": ["Film Noir", "Jazz", "Art House Cinema", ...]
