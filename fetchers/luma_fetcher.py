@@ -28,6 +28,18 @@ _ALLOWED_CITIES = {
     "Burnaby",
     "Richmond",
     "University Endowment Lands",
+    "North Vancouver",
+    "West Vancouver",
+    "Surrey",
+    "Coquitlam",
+    "New Westminster",
+    "Port Coquitlam",
+    "Port Moody",
+    "Maple Ridge",
+    "Langley",
+    "Delta",
+    "Pitt Meadows",
+    "Lions Bay",
 }
 
 
