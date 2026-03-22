@@ -6,6 +6,7 @@ fetch upcoming public events in Vancouver.  No API key required.
 """
 
 import logging
+import os
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,19 @@ import requests
 from .base import BaseEventFetcher, Event
 
 logger = logging.getLogger(__name__)
+
+
+def _build_proxies() -> dict | None:
+    """Build a requests proxy dict from env vars, or return None if not configured."""
+    host = os.getenv("HOST")
+    port = os.getenv("PORT")
+    login = os.getenv("LOGIN")
+    pw = os.getenv("PW")
+    if all([host, port, login, pw]):
+        proxy_url = f"http://{login}:{pw}@{host}:{port}"
+        return {"http": proxy_url, "https": proxy_url}
+    return None
+
 
 _DISCOVER_URL = "https://api.lu.ma/discover/get-paginated-events"
 _DETAIL_URL = "https://api.lu.ma/event/get"
@@ -138,6 +152,7 @@ def _fetch_event_description(api_id: str) -> str:
             params={"event_api_id": api_id, "series_mode": "next_only"},
             headers=_HEADERS,
             timeout=10,
+            proxies=_build_proxies(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -194,6 +209,7 @@ class LumaFetcher(BaseEventFetcher):
             try:
                 resp = requests.get(
                     _DISCOVER_URL, params=params, headers=_HEADERS, timeout=15,
+                    proxies=_build_proxies(),
                 )
                 resp.raise_for_status()
                 data = resp.json()
