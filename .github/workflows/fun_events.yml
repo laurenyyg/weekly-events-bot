@@ -1,0 +1,41 @@
+name: Vancouver Fun Events (Bi-weekly)
+
+on:
+  schedule:
+    - cron: "50 1 * * 0"  # Every Sunday 01:50 UTC (Sat 6:50 PM PDT)
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check if this is an even-numbered week
+        id: week_check
+        run: |
+          WEEK=$(date +%V | sed 's/^0*//')
+          echo "Week number: $WEEK"
+          if (( WEEK % 2 == 0 )); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Odd week — skipping fun events run."
+          fi
+
+      - name: Run fun events bot
+        if: steps.week_check.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FUN_WEBHOOK_URL: ${{ secrets.FUN_WEBHOOK_URL }}
+        run: python main.py --profile fun

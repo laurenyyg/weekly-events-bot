@@ -1,0 +1,28 @@
+name: Vancouver Tech Events (Weekly)
+
+on:
+  schedule:
+    - cron: "50 1 * * 0"  # Every Sunday 01:50 UTC (Sat 6:50 PM PDT)
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tech events bot
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TECH_WEBHOOK_URL: ${{ secrets.TECH_WEBHOOK_URL }}
+        run: python main.py --profile tech
