@@ -26,6 +26,8 @@
 - **Model selection**: Prefer Sonnet-class models for the best cost/quality balance. Upgrade to
   Opus only if filtering quality degrades noticeably. Do not silently downgrade to Haiku —
   filtering precision will suffer.
+  - **Exception**: The summary-only call for keyword-matched events uses `claude-haiku-4-5-20251001`.
+    No relevance judgment is made in this call, so Haiku's lower precision is acceptable.
 - **Thinking**: Always enable extended thinking for the LLM filter step; it meaningfully improves
   recall accuracy when matching events to keywords.
   - Opus 4.6: use `thinking={"type": "adaptive"}`

@@ -402,7 +402,7 @@ def filter_events_with_llm(
     if keyword_matched:
         log.info("Requesting summaries for %d pre-matched event(s)...", len(keyword_matched))
         with client.messages.stream(
-            model=model,
+            model="claude-haiku-4-5-20251001",
             max_tokens=_SUMMARY_MAX_TOKENS,
             system=cached_system,
             messages=[{"role": "user", "content": build_summary_prompt(keyword_matched)}],
