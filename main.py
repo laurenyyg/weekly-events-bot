@@ -616,23 +616,20 @@ def format_slack_message(
             }
         )
 
-    context_elements: list[dict] = [
-        {"type": "mrkdwn", "text": f":robot_face: Filtered by `{model}`"},
-    ]
+    if llm_usage:
+        budget_label = "Hit" if llm_usage.budget_hit else "OK"
+        footer_text = (
+            f":robot_face: `{llm_usage.model_id}` | "
+            f"Tokens: {llm_usage.total_tokens:,}/{llm_usage.max_tokens:,} | "
+            f"Budget: {budget_label}"
+        )
+    else:
+        footer_text = f":robot_face: `{model}`"
+    context_elements: list[dict] = [{"type": "mrkdwn", "text": footer_text}]
     if profile == "tech":
         context_elements.append({
             "type": "mrkdwn",
             "text": ":information_source: Events sourced from Luma's curated iCal feed — check <https://lu.ma/vancouver|lu.ma/vancouver> manually for completeness.",
-        })
-    if llm_usage:
-        budget_label = "Hit" if llm_usage.budget_hit else "OK"
-        context_elements.append({
-            "type": "mrkdwn",
-            "text": (
-                f"_Model: {llm_usage.model_id} | "
-                f"Tokens: {llm_usage.total_tokens:,}/{llm_usage.max_tokens:,} | "
-                f"Budget: {budget_label}_"
-            ),
         })
     blocks.append({"type": "context", "elements": context_elements})
 
