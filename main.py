@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -343,6 +344,25 @@ def _build_filtered_events(parsed: list[dict], source_events: list[Event]) -> li
     return result
 
 
+def _stream_with_retry(client: anthropic.Anthropic, max_retries: int = 3, **kwargs):
+    """Call client.messages.stream with exponential backoff on overloaded_error."""
+    delay = 30
+    for attempt in range(max_retries):
+        try:
+            with client.messages.stream(**kwargs) as stream:
+                return stream.get_final_message()
+        except anthropic.APIStatusError as exc:
+            if attempt < max_retries - 1 and "overloaded_error" in str(exc):
+                log.warning(
+                    "Anthropic API overloaded (attempt %d/%d); retrying in %ds...",
+                    attempt + 1, max_retries, delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
+
+
 def filter_events_with_llm(
     events: list[Event],
     keywords: list[str],
@@ -401,13 +421,13 @@ def filter_events_with_llm(
     # Stage 2a: summary-only call for keyword-matched events (no thinking needed).
     if keyword_matched:
         log.info("Requesting summaries for %d pre-matched event(s)...", len(keyword_matched))
-        with client.messages.stream(
+        resp = _stream_with_retry(
+            client,
             model="claude-haiku-4-5-20251001",
             max_tokens=_SUMMARY_MAX_TOKENS,
             system=cached_system,
             messages=[{"role": "user", "content": build_summary_prompt(keyword_matched)}],
-        ) as stream:
-            resp = stream.get_final_message()
+        )
         resolved_model = resp.model
         total_input += resp.usage.input_tokens
         total_output += resp.usage.output_tokens
@@ -425,14 +445,14 @@ def filter_events_with_llm(
             "Sending %d unmatched event(s) to LLM for filtering (profile=%s, model=%s)...",
             len(unmatched), profile, model,
         )
-        with client.messages.stream(
+        resp = _stream_with_retry(
+            client,
             model=model,
             max_tokens=_MAX_TOKENS,
             system=cached_system,
             thinking=thinking,
             messages=[{"role": "user", "content": build_filter_prompt(unmatched, keywords)}],
-        ) as stream:
-            resp = stream.get_final_message()
+        )
         resolved_model = resp.model
         total_input += resp.usage.input_tokens
         total_output += resp.usage.output_tokens
