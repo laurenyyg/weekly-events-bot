@@ -56,10 +56,6 @@ def _is_in_coverage_area(event: dict) -> bool:
         return True
     geo: dict = event.get("geo_address_info") or {}
     city = geo.get("city", "")
-    # If geo data is missing, pass through — discover_page=vancouver already
-    # scopes the feed to the Vancouver region.
-    if not city:
-        return True
     return city in _ALLOWED_CITIES
 
 
