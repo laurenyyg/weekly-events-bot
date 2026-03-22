@@ -3,7 +3,7 @@ name: Vancouver Fun Events (Bi-weekly)
 on:
   schedule:
     - cron: "*/5 * * * *"  # Every Sunday 04:00 UTC (Sat 9:00 PM PDT)
-  workflow_dispatch:
+  workflow_dispatch: 
 
 jobs:
   run-bot:
