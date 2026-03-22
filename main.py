@@ -26,6 +26,7 @@ import sys
 import traceback
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import anthropic
 import requests
@@ -48,6 +49,15 @@ from fetchers import (
 load_dotenv()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+_CONFIG_PATH = Path(__file__).parent / "config.json"
+try:
+    _CONFIG: dict = json.loads(_CONFIG_PATH.read_text())
+except (FileNotFoundError, json.JSONDecodeError) as _e:
+    logging.getLogger("vancouver-events-bot").warning(
+        "Could not load config.json: %s — falling back to empty keyword lists.", _e
+    )
+    _CONFIG = {}
 
 # ---------------------------------------------------------------------------
 # Profile configuration
@@ -81,18 +91,16 @@ PROFILE_SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
-def _parse_keywords(raw: str, defaults: str) -> list[str]:
-    """Split a comma-separated keyword string, falling back to defaults.
+def _load_keywords(profile: str) -> list[str]:
+    """Return the keyword list for the given profile from config.json.
 
     Args:
-        raw:      Raw value from os.getenv (may be empty or None).
-        defaults: Fallback comma-separated string if raw is empty.
+        profile: One of 'tech' or 'fun'.
 
     Returns:
-        A list of stripped, non-empty keyword strings.
+        A list of keyword strings, or an empty list if the key is missing.
     """
-    source = raw if raw and raw.strip() else defaults
-    return [k.strip() for k in source.split(",") if k.strip()]
+    return _CONFIG.get(f"{profile}_keywords", [])
 
 
 def load_profile_config(profile: str) -> tuple[str, list[str], list[BaseEventFetcher]]:
@@ -110,18 +118,12 @@ def load_profile_config(profile: str) -> tuple[str, list[str], list[BaseEventFet
     """
     if profile == "tech":
         webhook_url = os.getenv("TECH_WEBHOOK_URL", "")
-        keywords = _parse_keywords(
-            os.getenv("TECH_KEYWORDS", ""),
-            "AI,machine learning,startup,data science,developer,cloud,SaaS",
-        )
         fetchers: list[BaseEventFetcher] = [LumaFetcher()]
     else:  # fun
         webhook_url = os.getenv("FUN_WEBHOOK_URL", "")
-        keywords = _parse_keywords(
-            os.getenv("FUN_KEYWORDS", ""),
-            "Film Noir,Art House,Restored Classic,World Cinema,Jazz,Classical Music,Concert,Performance,Theatre,Avant-garde",
-        )
         fetchers = [ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]
+
+    keywords = _load_keywords(profile)
 
     if not webhook_url:
         env_var = "TECH_WEBHOOK_URL" if profile == "tech" else "FUN_WEBHOOK_URL"
