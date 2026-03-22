@@ -615,6 +615,19 @@ def main() -> None:
         all_events: list[Event] = [
             event for result in fetcher_results for event in result.events
         ]
+
+        # Deduplicate by (normalised title, date) — keeps the first occurrence.
+        seen: set[tuple[str, str]] = set()
+        deduped: list[Event] = []
+        for event in all_events:
+            key = (event.title.strip().lower(), event.date)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(event)
+        if len(deduped) < len(all_events):
+            log.info("Deduplicated %d duplicate(s).", len(all_events) - len(deduped))
+        all_events = deduped
+
         raw_count = len(all_events)
         log.info("Total events collected (raw): %d", raw_count)
 
