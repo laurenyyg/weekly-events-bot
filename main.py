@@ -599,6 +599,11 @@ def format_slack_message(
     context_elements: list[dict] = [
         {"type": "mrkdwn", "text": f":robot_face: Filtered by `{model}`"},
     ]
+    if profile == "tech":
+        context_elements.append({
+            "type": "mrkdwn",
+            "text": ":information_source: Events sourced from Luma's curated iCal feed — check <https://lu.ma/vancouver|lu.ma/vancouver> manually for completeness.",
+        })
     if llm_usage:
         budget_label = "Hit" if llm_usage.budget_hit else "OK"
         context_elements.append({
