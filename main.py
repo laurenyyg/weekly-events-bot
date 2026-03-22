@@ -645,6 +645,22 @@ def main() -> None:
         filtered_events, model = filter_events_with_llm(
             all_events, keywords, profile, ANTHROPIC_API_KEY, model
         )
+
+        # Deduplicate LLM output — the model occasionally emits the same event twice.
+        seen_llm: set[tuple[str, str]] = set()
+        deduped_filtered: list[FilteredEvent] = []
+        for fe in filtered_events:
+            key = (fe.event.title.strip().lower(), fe.event.date)
+            if key not in seen_llm:
+                seen_llm.add(key)
+                deduped_filtered.append(fe)
+        if len(deduped_filtered) < len(filtered_events):
+            log.info(
+                "Removed %d LLM-duplicated event(s).",
+                len(filtered_events) - len(deduped_filtered),
+            )
+        filtered_events = deduped_filtered
+
         log.info(
             "Recall: %d raw → %d LLM-approved (%.0f%%)",
             raw_count,
