@@ -19,6 +19,7 @@ Environment variables (in .env):
 """
 
 import argparse
+import difflib
 import json
 import logging
 import re
@@ -104,8 +105,8 @@ PROFILE_SYSTEM_PROMPTS: dict[str, str] = {
         "Write recommendation summaries in an elegant, sophisticated tone — evocative, "
         "precise, and never breathless. Two sentences maximum.\n\n"
         "Begin every summary with exactly one emoji followed by a space, and use no other "
-        "emojis in it: 🎞️ for film, 🏛️ for classical music, theatre, and cultural "
-        "institutions, 🎷 for jazz and other music. For the few standout picks — no more "
+        "emojis in it: 🎞️ for film, 🏛️ for classical music, orchestras, choirs, theatre, "
+        "and cultural institutions, 🎷 for jazz and other music. For the few standout picks — no more "
         "than one in four — use 🌟 instead.\n\n"
         "Be selective: only events with genuine artistic merit or clear keyword alignment "
         "qualify."
@@ -302,6 +303,9 @@ _GROUNDING_RULES = (
     "the description, the tags, or facts you know for certain about that specific work."
 )
 
+# Shared by both calls so blurbs read evenly whichever call wrote them.
+_SUMMARY_LENGTH = "one or two sentences, 25–40 words in total"
+
 
 def _slim_events_json(events: list[Event]) -> str:
     """Serialize only the fields the LLM needs to judge and describe events.
@@ -345,7 +349,7 @@ def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
    - The venue alone is not a match: a film at an art-house cinema still needs its
      own description or known content to fit a keyword. If an event has no
      description and you don't know the specific work, leave it out.
-3. For each RELEVANT event, write a one- or two-sentence recommendation explaining
+3. For each RELEVANT event, write a recommendation of {_SUMMARY_LENGTH} explaining
    why someone interested in those topics should attend.
 4. Return a JSON array. Include ONLY relevant events. Each object must have:
    - "title": string (exact title from input)
@@ -384,7 +388,7 @@ def build_summary_prompt(events: list[Event]) -> str:
     Returns:
         A prompt string asking the LLM only to write summaries, not to filter.
     """
-    return f"""These events are already confirmed relevant. For each, write a one- or two-sentence recommendation explaining why someone interested should attend. {_GROUNDING_RULES}
+    return f"""These events are already confirmed relevant. For each, write a recommendation of {_SUMMARY_LENGTH} explaining why someone interested should attend. {_GROUNDING_RULES}
 
 Return a JSON array where each object has:
 - "title": string (exact title from input)
@@ -436,14 +440,19 @@ def _title_key(title: str) -> str:
     return " ".join(re.sub(r"[\W_]+", " ", folded).split()) or title
 
 
+_FUZZY_TITLE_CUTOFF = 0.9
+
+
 def _build_filtered_events(
     parsed: list[dict], source_events: list[Event]
 ) -> tuple[list[FilteredEvent], list[str]]:
     """Match LLM output items back to original Event objects.
 
-    Titles are compared via _title_key. When several source events share a
-    title (e.g. repeat screenings), each returned item claims the next unused
-    one so later dates aren't lost.
+    Titles are compared via _title_key. A title with no exact match falls back
+    to the closest source title at least _FUZZY_TITLE_CUTOFF similar, so a
+    one-letter typo from the LLM doesn't drop a real event. When several source
+    events share a title (e.g. repeat screenings), each returned item claims
+    the next unused one so later dates aren't lost.
 
     Args:
         parsed:       List of dicts with 'title' and 'summary' keys from LLM.
@@ -461,7 +470,13 @@ def _build_filtered_events(
     result: list[FilteredEvent] = []
     unknown_titles: list[str] = []
     for item in parsed:
-        candidates = by_key.get(_title_key(str(item.get("title", ""))), [])
+        key = _title_key(str(item.get("title", "")))
+        if key not in by_key:
+            close = difflib.get_close_matches(key, by_key, n=1, cutoff=_FUZZY_TITLE_CUTOFF)
+            if close:
+                log.info("Matched LLM title %r to %r.", item.get("title"), by_key[close[0]][0].title)
+                key = close[0]
+        candidates = by_key.get(key, [])
         if not candidates:
             log.warning("LLM returned unknown event title: %s", item.get("title"))
             unknown_titles.append(str(item.get("title")))

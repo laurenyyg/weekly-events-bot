@@ -216,6 +216,29 @@ def test_titles_match_despite_cosmetic_changes() -> None:
     assert unknown == ["Totally Different Event"]
 
 
+def test_title_typo_still_matches() -> None:
+    real = _event("Chan Centre EXP: First Ladies of the Blues Starring Krystle Dos...")
+    parsed = [{"title": "Chan Centre EXP: First Ladies of the Blues Starring Krystole Dos...",
+               "summary": "s"}]
+    matched, unknown = main._build_filtered_events(parsed, [real, _event("Kanal")])
+    assert [fe.event for fe in matched] == [real]
+    assert unknown == []
+
+
+def test_dissimilar_title_not_fuzzy_matched() -> None:
+    matched, unknown = main._build_filtered_events(
+        [{"title": "Kanal II", "summary": "s"}], [_event("Kanal")]
+    )
+    assert matched == []
+    assert unknown == ["Kanal II"]
+
+
+def test_both_prompts_share_summary_length() -> None:
+    events = [_event("Kanal")]
+    assert main._SUMMARY_LENGTH in main.build_filter_prompt(events, ["Film"])
+    assert main._SUMMARY_LENGTH in main.build_summary_prompt(events)
+
+
 def test_repeat_screenings_each_get_their_own_event() -> None:
     first, second = _event("Vertigo"), _event("Vertigo")
     second.date = "2026-11-15"
