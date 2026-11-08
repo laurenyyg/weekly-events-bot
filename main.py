@@ -102,10 +102,13 @@ PROFILE_SYSTEM_PROMPTS: dict[str, str] = {
         "Prioritise events that reward a cultivated palate — Film Noir, Art House, Restored "
         "Classics, and serious live performance are the gold standard.\n\n"
         "Write recommendation summaries in an elegant, sophisticated tone — evocative, "
-        "precise, and never breathless. Two sentences maximum. Use emojis sparingly but "
-        "purposefully (🎞️ for film, 🏛️ for cultural institutions, 🎷 for jazz/music, "
-        "🌟 for standout picks). Be selective: only events with genuine artistic merit "
-        "or clear keyword alignment qualify."
+        "precise, and never breathless. Two sentences maximum.\n\n"
+        "Begin every summary with exactly one emoji followed by a space, and use no other "
+        "emojis in it: 🎞️ for film, 🏛️ for classical music, theatre, and cultural "
+        "institutions, 🎷 for jazz and other music. For the few standout picks — no more "
+        "than one in four — use 🌟 instead.\n\n"
+        "Be selective: only events with genuine artistic merit or clear keyword alignment "
+        "qualify."
     ),
 }
 
@@ -292,11 +295,36 @@ def run_fetchers(
 # Step 3: LLM filtering via DeepSeek (Anthropic-compatible API)
 # ---------------------------------------------------------------------------
 
+_VENUE_HINT = (
+    "Use each event's venue to tell what kind of event it is: an event at a cinema "
+    "is a film screening, even if its title sounds like a concert or a play."
+)
+
+
+def _slim_events_json(events: list[Event]) -> str:
+    """Serialize only the fields the LLM needs to judge and describe events.
+
+    Venue is included because some sources (e.g. Cinematheque) provide no
+    description, leaving the title as the only other clue to the event type.
+
+    Args:
+        events: Events to include in the prompt.
+
+    Returns:
+        A JSON array string of title, venue, description, and tags per event.
+    """
+    slim_events = [
+        {"title": e.title, "venue": e.location, "description": e.description, "tags": e.tags}
+        for e in events
+    ]
+    return json.dumps(slim_events, indent=2)
+
+
 def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
     """Build the user-turn prompt for the LLM filtering step.
 
-    Only the fields needed for relevance judgment are included (title, description,
-    tags). All other fields are stripped to reduce input token cost.
+    Only the fields needed for relevance judgment are included (title, venue,
+    description, tags). All other fields are stripped to reduce input token cost.
 
     Args:
         events:   All candidate events to be evaluated.
@@ -305,15 +333,11 @@ def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
     Returns:
         A formatted prompt string ready to be sent as the user message.
     """
-    slim_events = [
-        {"title": e.title, "description": e.description, "tags": e.tags}
-        for e in events
-    ]
-    events_json = json.dumps(slim_events, indent=2)
+    events_json = _slim_events_json(events)
     keywords_str = ", ".join(f'"{k}"' for k in keywords)
 
     return f"""Your task:
-1. Review the list of events below.
+1. Review the list of events below. {_VENUE_HINT}
 2. For each event, decide if it is relevant to ANY of these keywords: {keywords_str}.
    - Be inclusive: partial matches, related themes, and implied relevance all count.
 3. For each RELEVANT event, write a one- or two-sentence recommendation explaining
@@ -355,11 +379,7 @@ def build_summary_prompt(events: list[Event]) -> str:
     Returns:
         A prompt string asking the LLM only to write summaries, not to filter.
     """
-    slim_events = [
-        {"title": e.title, "description": e.description, "tags": e.tags}
-        for e in events
-    ]
-    return f"""These events are already confirmed relevant. For each, write a one- or two-sentence recommendation explaining why someone interested should attend.
+    return f"""These events are already confirmed relevant. For each, write a one- or two-sentence recommendation explaining why someone interested should attend. {_VENUE_HINT}
 
 Return a JSON array where each object has:
 - "title": string (exact title from input)
@@ -368,7 +388,7 @@ Return a JSON array where each object has:
 Respond with ONLY the JSON array, no markdown fences, no extra text.
 
 Events:
-{json.dumps(slim_events, indent=2)}"""
+{_slim_events_json(events)}"""
 
 
 def _parse_llm_json(raw_text: str) -> list[dict] | None:

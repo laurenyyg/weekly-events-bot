@@ -310,6 +310,20 @@ def test_clean_run_has_no_banner() -> None:
     assert payload["text"] == "Vancouver Events (Fun): Nov 09 – Nov 22, 2026"
 
 
+def test_prompts_include_venue() -> None:
+    clowns = _event("My Family and Other Clowns")
+    clowns.location = "The Cinematheque, 1131 Howe Street, Vancouver"
+    for prompt in (main.build_filter_prompt([clowns], ["Theatre"]), main.build_summary_prompt([clowns])):
+        assert '"venue": "The Cinematheque, 1131 Howe Street, Vancouver"' in prompt
+        assert main._VENUE_HINT in prompt
+
+
+def test_venue_does_not_trigger_keyword_match() -> None:
+    event = _event("UBC Bands")
+    event.location = "Chan Shun Concert Hall"
+    assert not main._matches_any_keyword(event, ["Concert"])
+
+
 def test_cost_alarm_and_low_balance_flagged() -> None:
     usage = main.LLMUsage(model_id="deepseek-v4-pro", cost_usd=main._COST_ALARM_USD + 0.01)
     text = json.dumps(_render(usage, main.DeepSeekBalance("USD", 0.42, True)), ensure_ascii=False)
