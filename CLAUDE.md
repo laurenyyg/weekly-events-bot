@@ -27,7 +27,10 @@
 - **Prompt caching**: automatic on DeepSeek; no `cache_control` markup. Both calls share the system prompt prefix and model, so the second call can hit the cache.
 - **Retries**: `_stream_with_retry` owns all retries (SDK `max_retries=0`). It retries 408/409/429/5xx, connection errors, and incomplete streams; it fails fast on 400/401/402/422. Final failures reach the fatal-error Slack alert.
 - **No silent drops**: invalid JSON, unmatched titles, missing summaries, and retries are added to `LLMUsage.warnings` and shown in Part B.
+- **Parsing**: `_parse_llm_json` takes the first JSON array of objects anywhere in the reply (tolerates fences and prose). Titles are matched via `_title_key` (case, punctuation, quotes, dashes, emoji ignored); repeat titles claim distinct events.
 - **Cost**: `_DEEPSEEK_PRICING` holds peak list prices (USD/1M tokens); off-peak is half. Keep scheduled runs off-peak (outside Mon–Fri 01:00–04:00 and 06:00–10:00 UTC). Update the table when DeepSeek changes prices.
+- **Spend alerts** (thresholds in `config.json`): a run whose estimated cost exceeds `cost_alarm_usd` gets a `:rotating_light: *Cost*` line; a balance below `low_balance_usd` (via free `GET /user/balance`, USD accounts only) gets a `:warning: *Balance*` line. A failed balance fetch is logged and skipped, never fatal.
+- **Config errors** (`config_errors()`: unreadable `config.json`, missing `DEEPSEEK_API_KEY`, unsupported model, empty keywords) post a CONFIG ERROR alert to Slack and exit 1. Only a missing webhook exits without a Slack alert.
 - **Goal**: High Recall at fetch/filter; High Precision in the final Slack digest.
 
 ## Slack Formatting
@@ -38,9 +41,9 @@
   _LLM-generated summary_
   ```
 - Three parts: **Part A** (curated events), **Part B** (diagnostics), **footer** (metadata).
-- Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit]`
-  - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices.
-- LLM warnings appear in Part B as `:warning: *LLM* — …` lines.
+- Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit] | Balance: $[usd]`
+  - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices. Balance is omitted if it couldn't be fetched.
+- Every issue (failed or 0-event fetcher, LLM warning, cost alarm, low balance) is one line in Part B. When there are any, a `:warning: *N issue(s) this run — see Part B.*` banner sits under the header, and the payload's top-level `text` (used for Slack notifications) says the same.
 - Tech profile footer also includes the Luma iCal completeness reminder.
 - Language: professional, concise, English only.
 

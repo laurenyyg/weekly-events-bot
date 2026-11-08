@@ -25,6 +25,7 @@ import re
 import sys
 import time
 import traceback
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -63,14 +64,19 @@ _DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
     "deepseek-flash": {"input": 0.30, "cached_input": 0.006, "output": 1.20},
 }
 
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
 _CONFIG_PATH = Path(__file__).parent / "config.json"
+_CONFIG_LOAD_ERROR = ""
 try:
     _CONFIG: dict = json.loads(_CONFIG_PATH.read_text())
 except (FileNotFoundError, json.JSONDecodeError) as _e:
-    logging.getLogger("vancouver-events-bot").warning(
-        "Could not load config.json: %s — falling back to empty keyword lists.", _e
-    )
+    _CONFIG_LOAD_ERROR = f"Could not load config.json: {_e}"
     _CONFIG = {}
+
+# Alert thresholds in USD (see format_slack_message).
+_COST_ALARM_USD = float(_CONFIG.get("cost_alarm_usd", 0.10))
+_LOW_BALANCE_USD = float(_CONFIG.get("low_balance_usd", 1.00))
 
 # ---------------------------------------------------------------------------
 # Profile configuration
@@ -127,8 +133,9 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
         fetchers for the selected profile.
 
     Raises:
-        SystemExit: If the required webhook URL env var is not set, or the
-            configured model is not a supported DeepSeek model.
+        SystemExit: If the required webhook URL env var is not set. Other
+            config mistakes are reported by config_errors() so they can be
+            posted to Slack.
     """
     if profile == "tech":
         webhook_url = os.getenv("TECH_WEBHOOK_URL", "")
@@ -140,13 +147,6 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
     keywords = _load_keywords(profile)
     model = _CONFIG.get(f"{profile}_model", _DEFAULT_MODEL)
 
-    if model not in _DEEPSEEK_PRICING:
-        logging.getLogger("vancouver-events-bot").error(
-            "Unsupported model '%s' for profile '%s' in config.json. Use one of: %s.",
-            model, profile, ", ".join(_DEEPSEEK_PRICING),
-        )
-        sys.exit(1)
-
     if not webhook_url:
         env_var = "TECH_WEBHOOK_URL" if profile == "tech" else "FUN_WEBHOOK_URL"
         logging.getLogger("vancouver-events-bot").error(
@@ -155,6 +155,32 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
         sys.exit(1)
 
     return webhook_url, model, keywords, fetchers
+
+
+def config_errors(profile: str, model: str, keywords: list[str]) -> list[str]:
+    """Return human-readable config mistakes that should stop the run.
+
+    Args:
+        profile:  Active profile name.
+        model:    Model ID resolved from config.json.
+        keywords: Keyword list resolved from config.json.
+
+    Returns:
+        A list of error messages; empty if the config is usable.
+    """
+    errors: list[str] = []
+    if _CONFIG_LOAD_ERROR:
+        errors.append(_CONFIG_LOAD_ERROR)
+    if not DEEPSEEK_API_KEY:
+        errors.append("Missing required environment variable: DEEPSEEK_API_KEY")
+    if model not in _DEEPSEEK_PRICING:
+        errors.append(
+            f"Unsupported model '{model}' for profile '{profile}' in config.json. "
+            f"Use one of: {', '.join(_DEEPSEEK_PRICING)}."
+        )
+    if not keywords and not _CONFIG_LOAD_ERROR:
+        errors.append(f"No keywords configured for profile '{profile}' in config.json.")
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +228,19 @@ class LLMUsage:
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.cached_input_tokens + self.output_tokens
+
+
+@dataclass
+class DeepSeekBalance:
+    currency: str      # "USD" or "CNY"
+    total: float
+    is_available: bool  # False once the balance can't cover API calls
+
+    @property
+    def is_low(self) -> bool:
+        if not self.is_available:
+            return True
+        return self.currency == "USD" and self.total < _LOW_BALANCE_USD
 
 
 # ---------------------------------------------------------------------------
@@ -333,24 +372,43 @@ Events:
 
 
 def _parse_llm_json(raw_text: str) -> list[dict] | None:
-    """Strip markdown fences and parse the LLM's JSON response.
+    """Extract the first JSON array of objects from the LLM's response.
+
+    Tolerates markdown fences, lead-in or trailing prose, and a wrapping
+    object such as {"events": [...]}.
 
     Args:
         raw_text: Raw text content from the LLM response.
 
     Returns:
-        Parsed list of dicts, or None on parse failure.
+        Parsed list of dicts, or None if no such array is found.
     """
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```", 2)[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
-    try:
-        return json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        log.error("LLM returned invalid JSON: %s\nRaw output:\n%s", exc, raw_text)
-        return None
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\[", raw_text):
+        try:
+            value, _ = decoder.raw_decode(raw_text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return value
+    log.error("LLM response contained no JSON array of objects. Raw output:\n%s", raw_text)
+    return None
+
+
+def _title_key(title: str) -> str:
+    """Normalise a title so cosmetic differences don't break matching.
+
+    Folds case and Unicode compatibility forms, and drops punctuation, quote
+    styles, dashes, and emoji, so “Jazz Night” — 🎷 matches "jazz night".
+
+    Args:
+        title: An event title.
+
+    Returns:
+        The normalised matching key.
+    """
+    folded = unicodedata.normalize("NFKC", title).casefold()
+    return " ".join(re.sub(r"[\W_]+", " ", folded).split()) or title
 
 
 def _build_filtered_events(
@@ -358,22 +416,33 @@ def _build_filtered_events(
 ) -> tuple[list[FilteredEvent], list[str]]:
     """Match LLM output items back to original Event objects.
 
+    Titles are compared via _title_key. When several source events share a
+    title (e.g. repeat screenings), each returned item claims the next unused
+    one so later dates aren't lost.
+
     Args:
         parsed:       List of dicts with 'title' and 'summary' keys from LLM.
         source_events: The original events that were sent to the LLM.
 
     Returns:
-        A (filtered_events, unknown_titles) tuple. Titles that don't exactly
-        match a source event are treated as hallucinations and dropped.
+        A (filtered_events, unknown_titles) tuple. Titles that match no
+        source event are treated as hallucinations and dropped.
     """
+    by_key: dict[str, list[Event]] = {}
+    for e in source_events:
+        by_key.setdefault(_title_key(e.title), []).append(e)
+    claimed: set[int] = set()
+
     result: list[FilteredEvent] = []
     unknown_titles: list[str] = []
     for item in parsed:
-        original = next((e for e in source_events if e.title == item.get("title")), None)
-        if original is None:
+        candidates = by_key.get(_title_key(str(item.get("title", ""))), [])
+        if not candidates:
             log.warning("LLM returned unknown event title: %s", item.get("title"))
             unknown_titles.append(str(item.get("title")))
             continue
+        original = next((e for e in candidates if id(e) not in claimed), candidates[0])
+        claimed.add(id(original))
         result.append(FilteredEvent(event=original, summary=item.get("summary", "")))
     return result, unknown_titles
 
@@ -626,6 +695,40 @@ def filter_events_with_llm(
     return filtered, usage.model_id, usage
 
 
+def fetch_deepseek_balance(api_key: str) -> DeepSeekBalance | None:
+    """Fetch the account's remaining DeepSeek balance.
+
+    This call is free. Any failure is logged and returns None so the digest
+    still posts.
+
+    Args:
+        api_key: DeepSeek API key.
+
+    Returns:
+        The balance (USD entry preferred), or None if it couldn't be read.
+    """
+    try:
+        resp = requests.get(
+            DEEPSEEK_BALANCE_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        infos = data.get("balance_infos") or []
+        info = next((i for i in infos if i.get("currency") == "USD"), infos[0] if infos else None)
+        if info is None:
+            raise ValueError("response has no balance_infos")
+        return DeepSeekBalance(
+            currency=info["currency"],
+            total=float(info["total_balance"]),
+            is_available=bool(data.get("is_available", True)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not fetch DeepSeek balance: %s", exc)
+        return None
+
+
 def _unknown_titles_warning(call_name: str, titles: list[str]) -> str:
     """Describe titles the model returned that matched no fetched event.
 
@@ -657,8 +760,13 @@ def format_slack_message(
     keywords: list[str],
     profile: str,
     llm_usage: LLMUsage | None = None,
+    balance: DeepSeekBalance | None = None,
 ) -> dict:
     """Build a Slack Block Kit payload.
+
+    Any issue (fetcher failure, LLM warning, cost alarm, low balance) gets a
+    line in Part B and is counted in a banner under the header and in the
+    notification preview text.
 
     Args:
         filtered_events: LLM-approved events with summaries.
@@ -670,24 +778,59 @@ def format_slack_message(
         profile:         Active profile name (shown in digest header).
         llm_usage:       Token usage, cost estimate, and warnings from the LLM
                          calls (warnings in Part B, the rest in the footer).
+        balance:         Remaining DeepSeek balance (footer; low balance is
+                         flagged in Part B), or None if it couldn't be read.
 
     Returns:
         A dict representing the Slack Block Kit payload.
     """
     week_str = f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
     profile_label = profile.capitalize()
+    title = f"Vancouver Events ({profile_label}): {week_str}"
+
+    issue_lines: list[str] = []
+    zero_event_fetchers: list[str] = []
+    for r in fetcher_results:
+        if not r.success:
+            issue_lines.append(f":x: *{r.name}* — FAILED: `{r.error}`")
+        elif len(r.events) == 0:
+            zero_event_fetchers.append(r.name)
+            issue_lines.append(
+                f":rotating_light: *{r.name}* — "
+                f"0 events returned | raw={r.raw_count} | *CHECK IMMEDIATELY*"
+            )
+    if llm_usage:
+        issue_lines.extend(f":warning: *LLM* — {w}" for w in llm_usage.warnings)
+        if llm_usage.cost_usd > _COST_ALARM_USD:
+            issue_lines.append(
+                f":rotating_light: *Cost* — this run cost an estimated ${llm_usage.cost_usd:.4f}, "
+                f"above the ${_COST_ALARM_USD:.2f} alarm (set `cost_alarm_usd` in config.json). "
+                "Check the token counts below and your DeepSeek usage page."
+            )
+    if balance and balance.is_low:
+        state = "can no longer cover API calls" if not balance.is_available else (
+            f"is below the ${_LOW_BALANCE_USD:.2f} alert (set `low_balance_usd` in config.json)"
+        )
+        issue_lines.append(
+            f":warning: *Balance* — DeepSeek balance {_format_balance(balance)} {state}. "
+            "Top up at <https://platform.deepseek.com/top_up|platform.deepseek.com>."
+        )
 
     blocks: list[dict] = [
         {
             "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"Vancouver Events ({profile_label}): {week_str}",
-                "emoji": True,
-            },
+            "text": {"type": "plain_text", "text": title, "emoji": True},
         },
-        {"type": "divider"},
     ]
+    if issue_lines:
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f":warning: *{len(issue_lines)} issue(s) this run — see Part B.*",
+            }],
+        })
+    blocks.append({"type": "divider"})
 
     # --- Part A: Curated Events ---
     blocks.append(
@@ -744,24 +887,13 @@ def format_slack_message(
         f"*LLM approved:* {approved}"
     ]
 
-    zero_event_fetchers: list[str] = []
-    for r in fetcher_results:
-        if not r.success:
-            diag_lines.append(f":x: *{r.name}* — FAILED: `{r.error}`")
-        elif len(r.events) == 0:
-            zero_event_fetchers.append(r.name)
-            diag_lines.append(
-                f":rotating_light: *{r.name}* — "
-                f"0 events returned | raw={r.raw_count} | *CHECK IMMEDIATELY*"
-            )
-        else:
-            diag_lines.append(
-                f":white_check_mark: *{r.name}* — "
-                f"{len(r.events)} in-area event(s)  _(raw: {r.raw_count})_"
-            )
-
-    if llm_usage:
-        diag_lines.extend(f":warning: *LLM* — {w}" for w in llm_usage.warnings)
+    diag_lines.extend(
+        f":white_check_mark: *{r.name}* — "
+        f"{len(r.events)} in-area event(s)  _(raw: {r.raw_count})_"
+        for r in fetcher_results
+        if r.success and r.events
+    )
+    diag_lines.extend(issue_lines)
 
     blocks.append(
         {
@@ -803,6 +935,8 @@ def format_slack_message(
         )
     else:
         footer_text = f":robot_face: `{model}`"
+    if balance:
+        footer_text += f" | Balance: {_format_balance(balance)}"
     context_elements: list[dict] = [{"type": "mrkdwn", "text": footer_text}]
     if profile == "tech":
         context_elements.append({
@@ -811,7 +945,16 @@ def format_slack_message(
         })
     blocks.append({"type": "context", "elements": context_elements})
 
-    return {"blocks": blocks}
+    # Slack shows `text` in push notifications and previews when blocks are present.
+    preview = f"{title} — ⚠️ {len(issue_lines)} issue(s), see Part B" if issue_lines else title
+    return {"text": preview, "blocks": blocks}
+
+
+def _format_balance(balance: DeepSeekBalance) -> str:
+    """Format a balance as e.g. '$4.87' or '35.20 CNY'."""
+    if balance.currency == "USD":
+        return f"${balance.total:,.2f}"
+    return f"{balance.total:,.2f} {balance.currency}"
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +970,7 @@ def post_fatal_error_to_slack(error: Exception, webhook_url: str) -> None:
     """
     tb = traceback.format_exc()
     payload = {
+        "text": "Vancouver Events Bot — FATAL ERROR, no digest posted",
         "blocks": [
             {
                 "type": "section",
@@ -853,6 +997,39 @@ def post_fatal_error_to_slack(error: Exception, webhook_url: str) -> None:
                       headers={"Content-Type": "application/json"})
     except Exception as slack_exc:  # noqa: BLE001
         log.error("Could not send fatal-error alert to Slack: %s", slack_exc)
+
+
+def post_config_errors_to_slack(errors: list[str], profile: str, webhook_url: str) -> None:
+    """Send an alert for config mistakes that stopped the run before it began.
+
+    Args:
+        errors:      Messages from config_errors().
+        profile:     Active profile name.
+        webhook_url: Slack incoming webhook URL.
+    """
+    bullet_list = "\n".join(f"• {e}" for e in errors)
+    payload = {
+        "text": f"Vancouver Events Bot ({profile}) — CONFIG ERROR, no digest posted",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        ":rotating_light: *Vancouver Events Bot — CONFIG ERROR* :rotating_light:\n"
+                        f"The `{profile}` run stopped before fetching events, so no digest was posted.\n"
+                        f"{bullet_list}\n"
+                        "Fix `config.json` or the GitHub secrets, then re-run the workflow."
+                    ),
+                },
+            },
+        ],
+    }
+    try:
+        requests.post(webhook_url, json=payload, timeout=10,
+                      headers={"Content-Type": "application/json"})
+    except Exception as slack_exc:  # noqa: BLE001
+        log.error("Could not send config-error alert to Slack: %s", slack_exc)
 
 
 def post_to_slack(payload: dict, webhook_url: str) -> None:
@@ -933,13 +1110,15 @@ def main() -> None:
     args = parse_args()
     profile = args.profile
 
-    # Validate shared env vars.
-    if not DEEPSEEK_API_KEY:
-        log.error("Missing required environment variable: DEEPSEEK_API_KEY")
-        sys.exit(1)
-
-    # Load profile-specific config (exits on missing webhook).
+    # Load profile-specific config (exits on missing webhook — there's nowhere to alert).
     webhook_url, model, keywords, active_fetchers = load_profile_config(profile)
+
+    errors = config_errors(profile, model, keywords)
+    if errors:
+        for error in errors:
+            log.error(error)
+        post_config_errors_to_slack(errors, profile, webhook_url)
+        sys.exit(1)
 
     log.info("Starting run — profile=%s", profile)
 
@@ -1006,9 +1185,12 @@ def main() -> None:
             (len(filtered_events) / raw_count * 100) if raw_count else 0,
         )
 
+        balance = fetch_deepseek_balance(DEEPSEEK_API_KEY)
+
         # Step 3 — Build and send Slack message.
         slack_payload = format_slack_message(
-            filtered_events, fetcher_results, start_date, end_date, model, keywords, profile, llm_usage
+            filtered_events, fetcher_results, start_date, end_date, model, keywords, profile,
+            llm_usage, balance,
         )
         post_to_slack(slack_payload, webhook_url)
 
