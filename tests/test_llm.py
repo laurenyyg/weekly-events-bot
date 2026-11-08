@@ -343,6 +343,61 @@ def test_few_missing_descriptions_not_flagged() -> None:
     assert "have no description" not in text
 
 
+def _showing(title: str, day: str, time: str, location: str = "VIFF Cinema") -> main.FilteredEvent:
+    event = _event(title)
+    event.date, event.time, event.location = day, time, location
+    return main.FilteredEvent(event=event, summary=f"About {title} on {day}.")
+
+
+def _part_a_texts(filtered: list[main.FilteredEvent]) -> list[str]:
+    payload = main.format_slack_message(
+        filtered, [], date(2026, 11, 9), date(2026, 11, 22), "deepseek-v4-pro", ["Film"], "fun",
+    )
+    return [
+        b["text"]["text"] for b in payload["blocks"]
+        if b["type"] == "section" and b["text"]["text"].startswith("*<")
+    ]
+
+
+def test_part_a_sorted_by_date_then_time_with_tbd_last() -> None:
+    texts = _part_a_texts([
+        _showing("Late", "2026-11-21", "8:10 PM"),
+        _showing("Unknown", "2026-11-15", "TBD"),
+        _showing("Noon", "2026-11-15", "12:00 PM"),
+        _showing("Morning", "2026-11-15", "11:00 AM"),
+    ])
+    assert [t.split("|")[1].split(">")[0] for t in texts] == ["Morning", "Noon", "Unknown", "Late"]
+
+
+def test_repeat_showings_merged_into_one_entry() -> None:
+    texts = _part_a_texts([
+        _showing("Yellow Letters", "2026-11-22", "1:20 PM", "Lochmaddy Studio Theatre"),
+        _showing("Kanal", "2026-11-22", "3:00 PM"),
+        _showing("Yellow Letters", "2026-11-21", "5:00 PM"),
+    ])
+    assert len(texts) == 2
+    merged = texts[0]
+    assert merged.startswith("*<https://example.com|Yellow Letters>*")
+    assert merged.index("2026-11-21 (Saturday)") < merged.index("2026-11-22 (Sunday)")
+    assert "Lochmaddy Studio Theatre" in merged
+    assert merged.count("_About Yellow Letters") == 1
+    assert "About Yellow Letters on 2026-11-21" in merged
+
+
+@pytest.mark.parametrize(("day", "time", "kept"), [
+    ("2026-11-13", "6:00 PM", True),
+    ("2026-11-13", "5:59 PM", False),
+    ("2026-11-13", "12:30 AM", False),
+    ("2026-11-13", "TBD", False),
+    ("2026-11-14", "TBD", True),
+    ("2026-11-12", "8:00 PM", False),
+])
+def test_weekend_filter(day: str, time: str, kept: bool) -> None:
+    event = _event("X")
+    event.date, event.time = day, time
+    assert main._passes_weekend_filter(event) is kept
+
+
 def test_cost_alarm_and_low_balance_flagged() -> None:
     usage = main.LLMUsage(model_id="deepseek-v4-pro", cost_usd=main._COST_ALARM_USD + 0.01)
     text = json.dumps(_render(usage, main.DeepSeekBalance("USD", 0.42, True)), ensure_ascii=False)

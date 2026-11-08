@@ -776,6 +776,50 @@ def _unknown_titles_warning(call_name: str, titles: list[str]) -> str:
 # Step 4: Format Slack message
 # ---------------------------------------------------------------------------
 
+def _minutes_of_day(time_str: str) -> int | None:
+    """Parse a time like "7:30 PM" into minutes after midnight.
+
+    Args:
+        time_str: An event time, e.g. "7:30 PM" or "TBD".
+
+    Returns:
+        Minutes after midnight, or None if no time is found.
+    """
+    m = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", time_str, re.IGNORECASE)
+    if not m:
+        return None
+    hour = int(m.group(1)) % 12
+    if m.group(3).upper() == "PM":
+        hour += 12
+    return hour * 60 + int(m.group(2))
+
+
+def _showing_sort_key(event: Event) -> tuple[str, int]:
+    """Order events by date, then time, with unknown times last in their day."""
+    minutes = _minutes_of_day(event.time)
+    return event.date, minutes if minutes is not None else 24 * 60
+
+
+def _group_showings(filtered_events: list[FilteredEvent]) -> list[list[FilteredEvent]]:
+    """Merge repeat showings of the same title into one entry, in date order.
+
+    Each group's showings are sorted, and groups are ordered by their
+    earliest showing.
+
+    Args:
+        filtered_events: LLM-approved events with summaries.
+
+    Returns:
+        Groups of showings; every group shares a title (per _title_key).
+    """
+    groups: dict[str, list[FilteredEvent]] = {}
+    for fe in filtered_events:
+        groups.setdefault(_title_key(fe.event.title), []).append(fe)
+    for showings in groups.values():
+        showings.sort(key=lambda fe: _showing_sort_key(fe.event))
+    return sorted(groups.values(), key=lambda showings: _showing_sort_key(showings[0].event))
+
+
 def format_slack_message(
     filtered_events: list[FilteredEvent],
     fetcher_results: list[FetcherResult],
@@ -885,13 +929,20 @@ def format_slack_message(
             }
         )
     else:
-        for fe in filtered_events:
-            e = fe.event
-            day_of_week = datetime.strptime(e.date, "%Y-%m-%d").strftime("%A")
+        for showings in _group_showings(filtered_events):
+            first = showings[0]
+            date_lines = []
+            for fe in showings:
+                e = fe.event
+                day_of_week = datetime.strptime(e.date, "%Y-%m-%d").strftime("%A")
+                date_lines.append(
+                    f":date: {e.date} ({day_of_week})  :clock1: {e.time}  "
+                    f":round_pushpin: {e.location}"
+                )
             event_text = (
-                f"*<{e.url}|{e.title}>*\n"
-                f":date: {e.date} ({day_of_week})  :clock1: {e.time}  :round_pushpin: {e.location}\n"
-                f"_{fe.summary}_"
+                f"*<{first.event.url}|{first.event.title}>*\n"
+                + "\n".join(date_lines)
+                + f"\n_{first.summary}_"
             )
             blocks.append(
                 {"type": "section", "text": {"type": "mrkdwn", "text": event_text}}
@@ -1100,15 +1151,10 @@ def _passes_weekend_filter(event: Event) -> bool:
     if dow in (5, 6):  # Saturday, Sunday
         return True
     if dow == 4:  # Friday — check time
-        m = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", event.time, re.IGNORECASE)
-        if not m:
+        minutes = _minutes_of_day(event.time)
+        if minutes is None:
             return False  # time unknown — exclude
-        hour = int(m.group(1))
-        if m.group(3).upper() == "PM" and hour != 12:
-            hour += 12
-        elif m.group(3).upper() == "AM" and hour == 12:
-            hour = 0
-        return hour >= 18
+        return minutes >= 18 * 60
     return False  # Mon–Thu
 
 

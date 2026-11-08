@@ -44,6 +44,7 @@
   :date: YYYY-MM-DD (Weekday)  :clock1: HH:MM AM/PM  :round_pushpin: Location
   _LLM-generated summary_
   ```
+- Part A is sorted by date, then time (`TBD` last within its day). Repeat showings of the same title merge into one entry: one `:date:` line per showing, then the earliest showing's summary.
 - Three parts: **Part A** (curated events), **Part B** (diagnostics), **footer** (metadata).
 - Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit] | Balance: $[usd]`
   - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices. Balance is omitted if it couldn't be fetched.
