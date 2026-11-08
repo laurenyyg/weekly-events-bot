@@ -304,7 +304,7 @@ _GROUNDING_RULES = (
 )
 
 # Shared by both calls so blurbs read evenly whichever call wrote them.
-_SUMMARY_LENGTH = "one or two sentences, 25–40 words in total"
+_SUMMARY_LENGTH = "one or two sentences, 20–30 words in total"
 
 
 def _slim_events_json(events: list[Event]) -> str:
@@ -363,6 +363,7 @@ Events:
 
 _MAX_TOKENS = 32768
 _SUMMARY_MAX_TOKENS = 8192
+_SUMMARY_ATTEMPTS = 2
 
 
 def _matches_any_keyword(event: Event, keywords: list[str]) -> bool:
@@ -654,25 +655,33 @@ def filter_events_with_llm(
     filtered: list[FilteredEvent] = []
 
     # Stage 2a: summary-only call for keyword-matched events. DeepSeek thinks by
-    # default, so thinking must be disabled explicitly.
+    # default, so thinking must be disabled explicitly. Without thinking the
+    # model occasionally emits malformed JSON, and the call is cheap, so a
+    # parse failure gets one more attempt.
     if keyword_matched:
         log.info("Requesting summaries for %d pre-matched event(s)...", len(keyword_matched))
-        resp, retries = _stream_with_retry(
-            client,
-            model=model,
-            max_tokens=_SUMMARY_MAX_TOKENS,
-            system=system_prompt,
-            thinking={"type": "disabled"},
-            messages=[{"role": "user", "content": build_summary_prompt(keyword_matched)}],
-        )
-        record(resp, retries, _SUMMARY_MAX_TOKENS)
+        parsed = None
+        for attempt in range(1, _SUMMARY_ATTEMPTS + 1):
+            resp, retries = _stream_with_retry(
+                client,
+                model=model,
+                max_tokens=_SUMMARY_MAX_TOKENS,
+                system=system_prompt,
+                thinking={"type": "disabled"},
+                messages=[{"role": "user", "content": build_summary_prompt(keyword_matched)}],
+            )
+            record(resp, retries, _SUMMARY_MAX_TOKENS)
 
-        raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
-        log.debug("Summary response:\n%s", raw_text)
-        parsed = _parse_llm_json(raw_text)
+            raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+            log.debug("Summary response:\n%s", raw_text)
+            parsed = _parse_llm_json(raw_text)
+            if parsed is not None:
+                break
+            log.warning("Summary call returned invalid JSON (attempt %d of %d).",
+                        attempt, _SUMMARY_ATTEMPTS)
         if parsed is None:
             usage.warnings.append(
-                f"Summary call returned invalid JSON — {len(keyword_matched)} "
+                f"Summary call returned invalid JSON {_SUMMARY_ATTEMPTS} times — {len(keyword_matched)} "
                 "keyword-matched event(s) are missing from Part A."
             )
         else:

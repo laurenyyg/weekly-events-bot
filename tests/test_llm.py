@@ -185,6 +185,41 @@ def test_silent_drops_become_warnings(anthropic_cls: MagicMock) -> None:
     assert "Filter call returned invalid JSON" in joined
 
 
+@patch("main.anthropic.Anthropic")
+def test_summary_invalid_json_is_retried_once(anthropic_cls: MagicMock) -> None:
+    client = _client(
+        _message('[{"title": "AI Meetup", "summary": "an "unescaped" quote"}]', output=30),
+        _message(json.dumps([{"title": "AI Meetup", "summary": "s"}]), output=20),
+    )
+    anthropic_cls.return_value = client
+
+    filtered, _, usage = main.filter_events_with_llm(
+        [_event("AI Meetup")], ["AI"], "tech", "key", "deepseek-v4-pro"
+    )
+
+    assert client.messages.stream.call_count == 2
+    assert [fe.summary for fe in filtered] == ["s"]
+    assert usage.output_tokens == 50
+    assert usage.warnings == []
+
+
+@patch("main.anthropic.Anthropic")
+def test_summary_invalid_json_twice_is_flagged(anthropic_cls: MagicMock) -> None:
+    client = _client(_message("not json"), _message("still not json"))
+    anthropic_cls.return_value = client
+
+    filtered, _, usage = main.filter_events_with_llm(
+        [_event("AI Meetup")], ["AI"], "tech", "key", "deepseek-v4-pro"
+    )
+
+    assert client.messages.stream.call_count == 2
+    assert filtered == []
+    assert usage.warnings == [
+        "Summary call returned invalid JSON 2 times — 1 keyword-matched event(s) "
+        "are missing from Part A."
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Parsing and title matching
 # ---------------------------------------------------------------------------
