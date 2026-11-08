@@ -6,14 +6,16 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 
 1. **Fetchers** collect events from configured sources for the upcoming two-week window
 2. **Keyword pre-filter** — events with a whole-word keyword match in title, description, or tags are auto-included and sent to the LLM for a summary only (thinking disabled)
-3. **LLM filtering** evaluates the remaining ambiguous events against profile-specific keywords with thinking enabled, and writes a one- or two-sentence recommendation for each approved event. Both LLM calls use the profile's DeepSeek model from `config.json` (`deepseek-v4-pro` by default) through DeepSeek's Anthropic-compatible API. DeepSeek caches the shared system prompt automatically.
-4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B, including fetcher problems, LLM warnings such as invalid JSON, dropped titles, or retries, and cost or balance alerts), and a metadata footer showing the model, token counts (input, cached input, output), estimated cost, whether the output budget was hit, and the remaining DeepSeek balance. If anything went wrong, a one-line banner under the header and the Slack notification text say how many issues to check in Part B.
+3. **LLM filtering** evaluates the remaining ambiguous events against profile-specific keywords with thinking enabled, and writes a one- or two-sentence recommendation for each approved event. Both LLM calls use the profile's DeepSeek model from `config.json` (`deepseek-v4-pro` by default) through DeepSeek's Anthropic-compatible API. DeepSeek caches the shared system prompt automatically. The summary call puts its instructions after the event list, because with thinking disabled the model tends to copy a long trailing list back instead of summarizing it. It retries once if the reply is invalid JSON or any event comes back without a summary. If the last reply still lacks summaries, those events stay in Part A without a blurb and Part B names them; if it is still invalid JSON, the auto-included events are left out and Part B says so.
+4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B, including fetcher problems, LLM warnings such as invalid JSON, missing summaries, dropped titles, or retries, and cost or balance alerts), and a metadata footer showing the model, token counts (input, cached input, output), estimated cost, whether the output budget was hit, and the remaining DeepSeek balance. The `tech` footer also notes which sources were polled and how to find more Luma calendars. If anything went wrong, a one-line banner under the header and the Slack notification text say how many issues to check in Part B.
 
 ## Alerts
 
 | Situation | Slack | GitHub Actions |
 |---|---|---|
 | Transient DeepSeek error that a retry fixes | Digest posts, with a retry warning in Part B | Green |
+| Summary reply still missing summaries after the retry | Digest posts; affected events have no blurb and are named in Part B | Green |
+| Summary reply still invalid JSON after the retry | Digest posts without the auto-included events, with a Part B warning | Green |
 | Permanent DeepSeek error (bad key, empty balance) or all retries fail | FATAL ERROR alert, no digest | Red (failure email) |
 | Config mistake (unreadable `config.json`, missing `DEEPSEEK_API_KEY`, non-DeepSeek model, no keywords, no Luma calendars for `tech`) | CONFIG ERROR alert, no digest | Red (failure email) |
 | Missing Slack webhook, or Slack itself is down | Nothing | Red (failure email) |
@@ -23,7 +25,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 
 | Profile | Sources | Schedule | Slack channel |
 |---------|---------|----------|---------------|
-| `tech` | Luma community calendars (`tech_luma_calendars`), Cerebral Valley remote AI events | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
+| `tech` | Luma community calendars (`tech_luma_calendars`), Cerebral Valley remote AI events | Every Sunday 04:00 UTC (Sat 8:00 PM PST / 9:00 PM PDT) — automated, manual trigger also available | Tech events |
 | `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 08:05 UTC (Sun 00:05 PST / 01:05 PDT) — every other week (next: Nov 15, 2026); manual triggers always run | Fun events |
 
 ### Keywords
@@ -88,9 +90,10 @@ The footer's cost estimate uses DeepSeek list prices from `_DEEPSEEK_PRICING` in
 ## Adding a new fetcher
 
 1. Create `fetchers/<name>_fetcher.py` inheriting from `BaseEventFetcher`
-2. Implement `fetch_events(start_date, end_date) -> list[Event]` with a try/except safe-fail
-3. Register it in `load_profile_config()` in `main.py`
-4. Add a parsing test in `tests/test_<name>.py`
+2. Implement `fetch_events(start_date, end_date) -> list[Event]`. Let exceptions propagate: the orchestrator catches them and reports the source as failed in Part B.
+3. Optionally set `self.raw_count` (in-range events before area filtering) and `self.empty_ok = True` once the source has loaded, so a quiet window shows as a neutral line in Part B instead of a "check immediately" alert
+4. Export it from `fetchers/__init__.py` and register it in `load_profile_config()` in `main.py`
+5. Add a parsing test in `tests/test_<name>_fetcher.py`
 
 ## Environment variables
 

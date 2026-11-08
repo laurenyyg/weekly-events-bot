@@ -4,7 +4,7 @@ on:
   schedule:
     # Keep runs outside DeepSeek peak hours (Mon–Fri 01:00–04:00 and 06:00–10:00 UTC),
     # which cost 2x. Weekends are entirely off-peak.
-    - cron: "0 4 * * 0"  # Every Sunday 04:00 UTC (Sat 9:00 PM PDT)
+    - cron: "0 4 * * 0"  # Every Sunday 04:00 UTC (Sat 8:00 PM PST / 9:00 PM PDT)
   workflow_dispatch:
 
 jobs:

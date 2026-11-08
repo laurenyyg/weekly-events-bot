@@ -99,7 +99,7 @@ class BaseEventFetcher(ABC):
             end_date:   Last day of the range (Sunday of upcoming week).
 
         Returns:
-            A list of Event objects. May be empty but must not raise.
+            A list of Event objects. May be empty.
 
         Raises:
             Any exception is allowed to propagate; the orchestrator will catch it.
