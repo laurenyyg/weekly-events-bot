@@ -15,8 +15,10 @@
 ## Architecture
 - All fetchers live in `fetchers/` and inherit from `BaseEventFetcher`.
 - Fetchers are assembled at runtime by `load_profile_config()` — not a static global:
-  - `tech` → `[LumaFetcher()]`
+  - `tech` → one `LumaFetcher(name, calendar_id)` per entry in `config.json` → `tech_luma_calendars`
   - `fun`  → `[ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]`
+- Luma: each calendar's iCal feed is `api2.luma.com/ics/get?entity=calendar&id=cal-…`. The `cal-…` ID is in the calendar page's HTML (`luma.com/<slug>`). An event on a host's "Personal" calendar has no slug, but its event page shows that calendar's ID, which works the same way. Events outside the Metro Vancouver bounding box (from GEO) and events marked postponed/cancelled (in STATUS or the title) are dropped. Don't use the `luma.com/vancouver` discover feed — it lists only Luma's featured picks, mostly social events.
+- A download or parse failure raises, so Part B shows the calendar as FAILED. A calendar whose feed loads but has nothing in the window sets `empty_ok` and shows as a `:white_circle:` line, not an alert; only an empty feed triggers the 0-events alert.
 - Credentials via `os.getenv` only. Never hardcode.
 - Listing pages without descriptions (Cinematheque, ChanCentre) call `fill_descriptions()` from `fetchers/base.py`: one GET per unique detail URL, parsed by a per-site `parse_<site>_description(html)`, capped at 500 chars. A failed page is logged and leaves `""`. Part B warns when over half of a fetcher's events have no description.
 - VIFF: the listing is paginated (`/whats-on/page/N/`) and cards show only a few dates ("View N more dates" → `#book`). `ViffFetcher` reads every page, then replaces those films' card dates with the full list from the film page. A failed listing page fails the fetcher; a failed film page keeps the card dates.
@@ -53,7 +55,7 @@
 - Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit] | Balance: $[usd]`
   - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices. Balance is omitted if it couldn't be fetched.
 - Every issue (failed or 0-event fetcher, LLM warning, cost alarm, low balance) is one line in Part B. When there are any, a `:warning: *N issue(s) this run — see Part B.*` banner sits under the header, and the payload's top-level `text` (used for Slack notifications) says the same.
-- Tech profile footer also includes the Luma iCal completeness reminder.
+- Tech profile footer also notes that events come only from the configured Luma calendars (with the count) and reminds the reader how to discover more: browse luma.com/vancouver or a liked event, open the host's calendar page, add its `cal-…` ID.
 - Language: professional, concise, English only.
 
 ## Testing & Validation

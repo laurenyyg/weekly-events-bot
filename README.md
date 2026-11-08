@@ -5,7 +5,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 ## How it works
 
 1. **Fetchers** collect events from configured sources for the upcoming two-week window
-2. **Keyword pre-filter** — events with a verbatim keyword match in title, description, or tags are auto-included and sent to the LLM for a summary only (thinking disabled)
+2. **Keyword pre-filter** — events with a whole-word keyword match in title, description, or tags are auto-included and sent to the LLM for a summary only (thinking disabled)
 3. **LLM filtering** evaluates the remaining ambiguous events against profile-specific keywords with thinking enabled, and writes a one- or two-sentence recommendation for each approved event. Both LLM calls use the profile's DeepSeek model from `config.json` (`deepseek-v4-pro` by default) through DeepSeek's Anthropic-compatible API. DeepSeek caches the shared system prompt automatically.
 4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B, including fetcher problems, LLM warnings such as invalid JSON, dropped titles, or retries, and cost or balance alerts), and a metadata footer showing the model, token counts (input, cached input, output), estimated cost, whether the output budget was hit, and the remaining DeepSeek balance. If anything went wrong, a one-line banner under the header and the Slack notification text say how many issues to check in Part B.
 
@@ -15,7 +15,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 |---|---|---|
 | Transient DeepSeek error that a retry fixes | Digest posts, with a retry warning in Part B | Green |
 | Permanent DeepSeek error (bad key, empty balance) or all retries fail | FATAL ERROR alert, no digest | Red (failure email) |
-| Config mistake (unreadable `config.json`, missing `DEEPSEEK_API_KEY`, non-DeepSeek model, no keywords) | CONFIG ERROR alert, no digest | Red (failure email) |
+| Config mistake (unreadable `config.json`, missing `DEEPSEEK_API_KEY`, non-DeepSeek model, no keywords, no Luma calendars for `tech`) | CONFIG ERROR alert, no digest | Red (failure email) |
 | Missing Slack webhook, or Slack itself is down | Nothing | Red (failure email) |
 | Run cost above `cost_alarm_usd` / balance below `low_balance_usd` | Digest posts, with a Part B alert | Green |
 
@@ -23,7 +23,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 
 | Profile | Sources | Schedule | Slack channel |
 |---------|---------|----------|---------------|
-| `tech` | Luma iCal | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
+| `tech` | Luma community calendars (`tech_luma_calendars`) | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
 | `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 08:05 UTC (Sun 00:05 PST / 01:05 PDT) — every other week (next: Nov 15, 2026); manual triggers always run | Fun events |
 
 ## Running locally
@@ -43,10 +43,13 @@ Keywords and each profile's model live in `config.json`:
   "fun_model": "deepseek-v4-pro",
   "cost_alarm_usd": 0.10,
   "low_balance_usd": 1.00,
+  "tech_luma_calendars": {"BC + AI Events": "cal-9QLMVT9CQVtX1u0", ...},
   "tech_keywords": ["AI", "Machine Learning", "Startup", ...],
   "fun_keywords": ["Film Noir", "Jazz", "Art House Cinema", ...]
 }
 ```
+
+To add a Luma calendar, open its page (`luma.com/<name>`), find the `cal-…` ID in the page source, and add it under `tech_luma_calendars` with a display name. For an event that isn't on a named calendar, use the `cal-…` ID shown on the event page (the host's personal calendar).
 
 If a profile's model is missing, it falls back to `deepseek-v4-pro`. Only DeepSeek models listed in `_DEEPSEEK_PRICING` in `main.py` (`deepseek-v4-pro`, `deepseek-flash`) are accepted; anything else, including Claude model IDs, stops the run at startup.
 

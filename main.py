@@ -143,7 +143,10 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
     """
     if profile == "tech":
         webhook_url = os.getenv("TECH_WEBHOOK_URL", "")
-        fetchers: list[BaseEventFetcher] = [LumaFetcher()]
+        fetchers: list[BaseEventFetcher] = [
+            LumaFetcher(name, calendar_id)
+            for name, calendar_id in _CONFIG.get("tech_luma_calendars", {}).items()
+        ]
     else:  # fun
         webhook_url = os.getenv("FUN_WEBHOOK_URL", "")
         fetchers = [ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]
@@ -184,6 +187,8 @@ def config_errors(profile: str, model: str, keywords: list[str]) -> list[str]:
         )
     if not keywords and not _CONFIG_LOAD_ERROR:
         errors.append(f"No keywords configured for profile '{profile}' in config.json.")
+    if profile == "tech" and not _CONFIG.get("tech_luma_calendars") and not _CONFIG_LOAD_ERROR:
+        errors.append("No Luma calendars configured under 'tech_luma_calendars' in config.json.")
     return errors
 
 
@@ -209,6 +214,7 @@ class FetcherResult:
     events: list[Event]
     error: str = ""
     raw_count: int = 0   # in-range events before geo/area filtering
+    empty_ok: bool = False  # 0 events is normal (e.g. a quiet Luma calendar)
 
 
 @dataclass
@@ -278,11 +284,17 @@ def run_fetchers(
         try:
             events = fetcher.fetch_events(start_date, end_date)
             raw_count = getattr(fetcher, "raw_count", len(events))
+            empty_ok = getattr(fetcher, "empty_ok", False)
             if events:
                 log.info("  → %d event(s) found (raw=%d)", len(events), raw_count)
+            elif empty_ok:
+                log.info("  → 0 events in range for '%s' (feed loaded normally)", fetcher.name)
             else:
                 log.warning("  → 0 events returned by '%s' — possible scraping breakage", fetcher.name)
-            results.append(FetcherResult(name=fetcher.name, success=True, events=events, raw_count=raw_count))
+            results.append(FetcherResult(
+                name=fetcher.name, success=True, events=events,
+                raw_count=raw_count, empty_ok=empty_ok,
+            ))
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             log.error("  → Fetcher '%s' failed: %s", fetcher.name, error_msg)
@@ -896,6 +908,8 @@ def format_slack_message(
     for r in fetcher_results:
         if not r.success:
             issue_lines.append(f":x: *{r.name}* — FAILED: `{r.error}`")
+        elif len(r.events) == 0 and r.empty_ok:
+            continue
         elif len(r.events) == 0:
             zero_event_fetchers.append(r.name)
             issue_lines.append(
@@ -1016,6 +1030,11 @@ def format_slack_message(
         for r in fetcher_results
         if r.success and r.events
     )
+    diag_lines.extend(
+        f":white_circle: *{r.name}* — 0 in-area event(s) this window  _(raw: {r.raw_count})_"
+        for r in fetcher_results
+        if r.success and not r.events and r.empty_ok
+    )
     diag_lines.extend(issue_lines)
 
     blocks.append(
@@ -1064,7 +1083,13 @@ def format_slack_message(
     if profile == "tech":
         context_elements.append({
             "type": "mrkdwn",
-            "text": ":information_source: Events sourced from Luma's curated iCal feed — check <https://lu.ma/vancouver|lu.ma/vancouver> manually for completeness.",
+            "text": (
+                f":information_source: Events come only from the {len(_CONFIG.get('tech_luma_calendars', {}))} "
+                "Luma calendars listed under `tech_luma_calendars` in config.json. "
+                "To discover more, browse <https://luma.com/vancouver|luma.com/vancouver> or open a tech "
+                "event you liked, click its host to reach their calendar page, and add that calendar's "
+                "`cal-…` ID (in the page source) to config.json."
+            ),
         })
     blocks.append({"type": "context", "elements": context_elements})
 

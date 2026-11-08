@@ -415,6 +415,29 @@ def _render_fetcher(events: list[Event]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def test_quiet_calendar_is_not_an_issue() -> None:
+    result = main.FetcherResult(name="Luma: Quiet", success=True, events=[], raw_count=3, empty_ok=True)
+    payload = main.format_slack_message(
+        [], [result], date(2026, 11, 9), date(2026, 11, 22), "deepseek-v4-pro", ["AI"], "tech",
+        main.LLMUsage(model_id="deepseek-v4-pro"), None,
+    )
+    text = json.dumps(payload, ensure_ascii=False)
+    assert ":white_circle: *Luma: Quiet* — 0 in-area event(s) this window" in text
+    assert "URGENT" not in text
+    assert "issue(s)" not in text
+
+
+def test_tech_footer_has_calendar_discovery_reminder() -> None:
+    payload = main.format_slack_message(
+        [], [], date(2026, 11, 9), date(2026, 11, 22), "deepseek-v4-pro", ["AI"], "tech",
+        main.LLMUsage(model_id="deepseek-v4-pro"), None,
+    )
+    text = json.dumps(payload, ensure_ascii=False)
+    count = len(main._CONFIG["tech_luma_calendars"])
+    assert f"Events come only from the {count} Luma calendars" in text
+    assert "To discover more" in text
+
+
 def test_mostly_missing_descriptions_flagged() -> None:
     text = _render_fetcher([_event("A"), _event("B"), _event("C", "A Dutch drama.")])
     assert ":warning: *Cinematheque* — 2 of 3 event(s) have no description" in text

@@ -3,6 +3,16 @@
   "fun_model": "deepseek-v4-pro",
   "cost_alarm_usd": 0.10,
   "low_balance_usd": 1.00,
+  "tech_luma_calendars": {
+    "BC + AI Events": "cal-9QLMVT9CQVtX1u0",
+    "Lenny's Newsletter Meetups": "cal-LxSRAvoOnOWxF9M",
+    "Vancouver Tech Journal": "cal-i2SXCQcJZBMq8NN",
+    "Vancouver Tech Week": "cal-SazQXSKydxdq2UG",
+    "Vancouver AI Meetup (VAM!)": "cal-KAGZBuhP9K2YNbA",
+    "Google Developer Community Vancouver": "cal-kZ2ps5sY83acE4j",
+    "LLM Reading Group": "cal-FKFCQcjSPzJvCiC",
+    "The Thread | Women+Tech Vancouver": "cal-wgABTcoNF1EcN6j"
+  },
   "tech_keywords": [
     "AI",
     "Machine Learning",
