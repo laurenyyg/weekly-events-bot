@@ -25,16 +25,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check if this is an even-numbered week
+      # GitHub cron can't express "every other week", so scheduled runs skip alternate
+      # weeks here. Weeks are counted since the Unix epoch rather than ISO week numbers,
+      # which repeat parity across 53-week years (week 53 → week 1) and would skip twice.
+      # Odd epoch weeks run, matching the previous even-ISO-week Sundays (e.g. 2026-11-15).
+      - name: Check if this is a run week
         id: week_check
         run: |
-          WEEK=$(date +%V | sed 's/^0*//')
-          echo "Week number: $WEEK"
-          if (( WEEK % 2 == 0 )); then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual run — skipping the bi-weekly check."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          EPOCH_WEEK=$(( $(date -u +%s) / 604800 ))
+          echo "Epoch week: $EPOCH_WEEK"
+          if (( EPOCH_WEEK % 2 == 1 )); then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Odd week — skipping fun events run."
+            echo "Off week — skipping fun events run."
           fi
 
       - name: Run fun events bot
