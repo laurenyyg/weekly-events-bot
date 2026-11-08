@@ -382,6 +382,30 @@ def test_venue_does_not_trigger_keyword_match() -> None:
     assert not main._matches_any_keyword(event, ["Concert"])
 
 
+@pytest.mark.parametrize("text", [
+    "Join us for a painting class", "Coaches are available", "Fairways & Friends",
+    "Win a beautiful hair clip", "Send an email to RSVP",
+])
+def test_keyword_inside_another_word_does_not_match(text: str) -> None:
+    assert not main._matches_any_keyword(_event("Social", text), ["AI"])
+
+
+@pytest.mark.parametrize("text, keyword", [
+    ("An AI-assisted CTF", "AI"),
+    ("AI, ML and more", "AI"),
+    ("Pitch night for Startups", "Startup"),
+    ("intro to machine learning", "Machine Learning"),
+])
+def test_keyword_matches_whole_word(text: str, keyword: str) -> None:
+    assert main._matches_any_keyword(_event("Event", text), [keyword])
+
+
+def test_part_b_shows_keyword_and_llm_split() -> None:
+    usage = main.LLMUsage(model_id="deepseek-v4-pro", keyword_matched=1, llm_judged=12)
+    text = json.dumps(_render(usage), ensure_ascii=False)
+    assert "*Keyword-matched:* 1 · *LLM-judged:* 12  →  *LLM approved:* 0" in text
+
+
 def _render_fetcher(events: list[Event]) -> str:
     result = main.FetcherResult(name="Cinematheque", success=True, events=events, raw_count=len(events))
     payload = main.format_slack_message(

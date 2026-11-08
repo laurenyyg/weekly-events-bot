@@ -227,6 +227,8 @@ class LLMUsage:
     cost_usd: float = 0.0
     off_peak: bool = True
     retries: int = 0
+    keyword_matched: int = 0       # took the summary-only shortcut
+    llm_judged: int = 0            # sent to the filter call
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -367,7 +369,10 @@ _SUMMARY_ATTEMPTS = 2
 
 
 def _matches_any_keyword(event: Event, keywords: list[str]) -> bool:
-    """Return True if any keyword appears verbatim in the event's text fields.
+    """Return True if any keyword appears as a whole word in the event's text fields.
+
+    Matching whole words keeps short keywords like "AI" from firing inside
+    ordinary words such as "painting". A plural "s"/"es" ending still matches.
 
     Args:
         event:    The event to check.
@@ -376,8 +381,11 @@ def _matches_any_keyword(event: Event, keywords: list[str]) -> bool:
     Returns:
         True if at least one keyword is found (case-insensitive).
     """
-    haystack = f"{event.title} {event.description} {' '.join(event.tags)}".lower()
-    return any(kw.lower() in haystack for kw in keywords)
+    haystack = f"{event.title} {event.description} {' '.join(event.tags)}"
+    return any(
+        re.search(rf"(?<!\w){re.escape(kw)}(?:s|es)?(?!\w)", haystack, re.IGNORECASE)
+        for kw in keywords
+    )
 
 
 def build_summary_prompt(events: list[Event]) -> str:
@@ -647,6 +655,8 @@ def filter_events_with_llm(
     # Stage 1: keyword pre-filter — split into confirmed-relevant vs ambiguous.
     keyword_matched = [e for e in events if _matches_any_keyword(e, keywords)]
     unmatched = [e for e in events if not _matches_any_keyword(e, keywords)]
+    usage.keyword_matched = len(keyword_matched)
+    usage.llm_judged = len(unmatched)
     log.info(
         "Pre-filter: %d keyword-matched (summary only), %d unmatched (LLM filter).",
         len(keyword_matched), len(unmatched),
@@ -986,11 +996,17 @@ def format_slack_message(
     total_area = sum(len(r.events) for r in fetcher_results)
     approved = len(filtered_events)
 
+    split = (
+        f"*Keyword-matched:* {llm_usage.keyword_matched} · "
+        f"*LLM-judged:* {llm_usage.llm_judged}  →  "
+        if llm_usage else ""
+    )
     diag_lines = [
         f"*Profile:* `{profile}`  |  "
         f"*Sources polled:* {len(fetcher_results)}  |  "
         f"*Raw (in range):* {total_raw}  →  "
         f"*In area:* {total_area}  →  "
+        f"{split}"
         f"*LLM approved:* {approved}"
     ]
 
