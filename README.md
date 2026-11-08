@@ -5,9 +5,9 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 ## How it works
 
 1. **Fetchers** collect events from configured sources for the upcoming two-week window
-2. **Keyword pre-filter** — events with a verbatim keyword match in title, description, or tags are auto-included and sent to Haiku (summary-only, no thinking overhead)
-3. **LLM filtering** (Claude Sonnet by default) evaluates the remaining ambiguous events against profile-specific keywords with extended thinking enabled, and writes a one- or two-sentence recommendation for each approved event. The system prompt is cached across both LLM calls to reduce input token cost.
-4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B), and a metadata footer showing model ID, total tokens used, and whether the output budget was hit
+2. **Keyword pre-filter** — events with a verbatim keyword match in title, description, or tags are auto-included and sent to the LLM for a summary only (thinking disabled)
+3. **LLM filtering** evaluates the remaining ambiguous events against profile-specific keywords with thinking enabled, and writes a one- or two-sentence recommendation for each approved event. Both LLM calls use the profile's DeepSeek model from `config.json` (`deepseek-v4-pro` by default) through DeepSeek's Anthropic-compatible API. DeepSeek caches the shared system prompt automatically.
+4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B, including any LLM warnings such as invalid JSON, dropped titles, or retries), and a metadata footer showing the model, token counts (input, cached input, output), estimated cost, and whether the output budget was hit
 
 ## Profiles
 
@@ -25,16 +25,22 @@ venv/bin/python main.py --profile fun
 
 ## Configuration
 
-Keywords and model selection live in `config.json`:
+Keywords and each profile's model live in `config.json`:
 
 ```json
 {
-  "tech_model": "claude-sonnet-4-6",
+  "tech_model": "deepseek-v4-pro",
+  "fun_model": "deepseek-v4-pro",
   "tech_keywords": ["AI", "Machine Learning", "Startup", ...],
-  "fun_model": "claude-sonnet-4-6",
   "fun_keywords": ["Film Noir", "Jazz", "Art House Cinema", ...]
 }
 ```
+
+If a profile's model is missing, it falls back to `deepseek-v4-pro`. Only DeepSeek models listed in `_DEEPSEEK_PRICING` in `main.py` (`deepseek-v4-pro`, `deepseek-flash`) are accepted; anything else, including Claude model IDs, stops the run at startup.
+
+## Cost
+
+The footer's cost estimate uses DeepSeek list prices from `_DEEPSEEK_PRICING` in `main.py`. Update that table if DeepSeek changes its prices. Peak hours (Mon–Fri 01:00–04:00 and 06:00–10:00 UTC) cost twice as much as off-peak. Both scheduled runs fall on Sunday, which is entirely off-peak. Avoid manual `workflow_dispatch` runs during peak hours, and keep any new cron schedule off-peak.
 
 ## Adding a new fetcher
 
@@ -47,6 +53,6 @@ Keywords and model selection live in `config.json`:
 
 | Variable | Required by |
 |----------|------------|
-| `ANTHROPIC_API_KEY` | Both profiles |
+| `DEEPSEEK_API_KEY` | Both profiles |
 | `TECH_WEBHOOK_URL` | `tech` profile |
 | `FUN_WEBHOOK_URL` | `fun` profile |

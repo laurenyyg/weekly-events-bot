@@ -2,6 +2,8 @@ name: Vancouver Tech Events (Weekly)
 
 on:
   schedule:
+    # Keep runs outside DeepSeek peak hours (Mon–Fri 01:00–04:00 and 06:00–10:00 UTC),
+    # which cost 2x. Weekends are entirely off-peak.
     - cron: "0 4 * * 0"  # Every Sunday 04:00 UTC (Sat 9:00 PM PDT)
   workflow_dispatch:
 
@@ -25,6 +27,6 @@ jobs:
 
       - name: Run tech events bot
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TECH_WEBHOOK_URL: ${{ secrets.TECH_WEBHOOK_URL }}
         run: python main.py --profile tech

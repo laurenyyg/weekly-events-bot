@@ -2,6 +2,8 @@ name: Vancouver Fun Events (Bi-weekly)
 
 on:
   schedule:
+    # Keep runs outside DeepSeek peak hours (Mon–Fri 01:00–04:00 and 06:00–10:00 UTC),
+    # which cost 2x. Weekends are entirely off-peak.
     - cron: "5 8 * * 0"  # Every Sunday 08:05 UTC (Sun 00:05 PST / 01:05 PDT)
   workflow_dispatch: 
 
@@ -38,6 +40,6 @@ jobs:
       - name: Run fun events bot
         if: steps.week_check.outputs.run == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           FUN_WEBHOOK_URL: ${{ secrets.FUN_WEBHOOK_URL }}
         run: python main.py --profile fun

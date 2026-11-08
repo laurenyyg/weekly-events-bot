@@ -1,6 +1,6 @@
 # Vancouver Events Bot — Cursor rules
 
-You are helping maintain this **Python** repo (event fetch → Anthropic → Slack). Prefer **clear, modular** code and match existing style in each file.
+You are helping maintain this **Python** repo (event fetch → DeepSeek via the `anthropic` SDK → Slack). Prefer **clear, modular** code and match existing style in each file.
 
 ## Stack and patterns (this project)
 - **Python 3** only; use **type hints** on new/changed functions per `CLAUDE.md`.
@@ -27,4 +27,4 @@ You are helping maintain this **Python** repo (event fetch → Anthropic → Sla
 - During informal (“vibe”) coding, **fix obvious syntax/type errors** without asking for permission.
 
 ## Source of truth
-- Profiles, LLM tiers (Haiku vs Sonnet), Slack Block Kit layout, and recall/precision goals live in **`CLAUDE.md`**. Do not contradict it; update it when behavior changes.
+- Profiles, LLM provider and model choice (DeepSeek only — never Claude model IDs), Slack Block Kit layout, and recall/precision goals live in **`CLAUDE.md`**. Do not contradict it; update it when behavior changes.

@@ -11,7 +11,7 @@ Usage:
     --profile fun              — lifestyle/arts digest via FUN_WEBHOOK_URL
 
 Environment variables (in .env):
-    ANTHROPIC_API_KEY   — required for LLM filtering (both profiles)
+    DEEPSEEK_API_KEY    — required for LLM filtering (both profiles)
     TECH_WEBHOOK_URL    — Slack webhook for the tech profile
     TECH_KEYWORDS       — comma-separated keywords for tech filtering
     FUN_WEBHOOK_URL     — Slack webhook for the fun profile
@@ -25,8 +25,8 @@ import re
 import sys
 import time
 import traceback
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import anthropic
@@ -49,7 +49,19 @@ from fetchers import (
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+# DeepSeek serves an Anthropic-compatible Messages API, so the anthropic SDK is reused.
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+_DEFAULT_MODEL = "deepseek-v4-pro"
+
+# USD per 1M tokens at PEAK rates; off-peak is half (see _is_off_peak).
+# Doubles as the allow-list of models: DeepSeek silently remaps unknown
+# "claude-*" names to its own models instead of rejecting them.
+_DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
+    "deepseek-v4-pro": {"input": 1.32, "cached_input": 0.044, "output": 3.96},
+    "deepseek-flash": {"input": 0.30, "cached_input": 0.006, "output": 1.20},
+}
 
 _CONFIG_PATH = Path(__file__).parent / "config.json"
 try:
@@ -115,7 +127,8 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
         fetchers for the selected profile.
 
     Raises:
-        SystemExit: If the required webhook URL env var is not set.
+        SystemExit: If the required webhook URL env var is not set, or the
+            configured model is not a supported DeepSeek model.
     """
     if profile == "tech":
         webhook_url = os.getenv("TECH_WEBHOOK_URL", "")
@@ -125,7 +138,14 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
         fetchers = [ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]
 
     keywords = _load_keywords(profile)
-    model = _CONFIG.get(f"{profile}_model", "claude-sonnet-4-6")
+    model = _CONFIG.get(f"{profile}_model", _DEFAULT_MODEL)
+
+    if model not in _DEEPSEEK_PRICING:
+        logging.getLogger("vancouver-events-bot").error(
+            "Unsupported model '%s' for profile '%s' in config.json. Use one of: %s.",
+            model, profile, ", ".join(_DEEPSEEK_PRICING),
+        )
+        sys.exit(1)
 
     if not webhook_url:
         env_var = "TECH_WEBHOOK_URL" if profile == "tech" else "FUN_WEBHOOK_URL"
@@ -170,9 +190,18 @@ class FilteredEvent:
 @dataclass
 class LLMUsage:
     model_id: str
-    total_tokens: int
-    max_tokens: int
-    budget_hit: bool
+    input_tokens: int = 0          # cache misses only
+    cached_input_tokens: int = 0
+    output_tokens: int = 0         # includes thinking tokens
+    budget_hit: bool = False
+    cost_usd: float = 0.0
+    off_peak: bool = True
+    retries: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.cached_input_tokens + self.output_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +250,7 @@ def run_fetchers(
 
 
 # ---------------------------------------------------------------------------
-# Step 3: LLM filtering via Anthropic API
+# Step 3: LLM filtering via DeepSeek (Anthropic-compatible API)
 # ---------------------------------------------------------------------------
 
 def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
@@ -324,7 +353,9 @@ def _parse_llm_json(raw_text: str) -> list[dict] | None:
         return None
 
 
-def _build_filtered_events(parsed: list[dict], source_events: list[Event]) -> list[FilteredEvent]:
+def _build_filtered_events(
+    parsed: list[dict], source_events: list[Event]
+) -> tuple[list[FilteredEvent], list[str]]:
     """Match LLM output items back to original Event objects.
 
     Args:
@@ -332,35 +363,137 @@ def _build_filtered_events(parsed: list[dict], source_events: list[Event]) -> li
         source_events: The original events that were sent to the LLM.
 
     Returns:
-        List of FilteredEvent, skipping any titles the LLM hallucinated.
+        A (filtered_events, unknown_titles) tuple. Titles that don't exactly
+        match a source event are treated as hallucinations and dropped.
     """
     result: list[FilteredEvent] = []
+    unknown_titles: list[str] = []
     for item in parsed:
         original = next((e for e in source_events if e.title == item.get("title")), None)
         if original is None:
             log.warning("LLM returned unknown event title: %s", item.get("title"))
+            unknown_titles.append(str(item.get("title")))
             continue
         result.append(FilteredEvent(event=original, summary=item.get("summary", "")))
-    return result
+    return result, unknown_titles
 
 
-def _stream_with_retry(client: anthropic.Anthropic, max_retries: int = 3, **kwargs):
-    """Call client.messages.stream with exponential backoff on overloaded_error."""
+class IncompleteStreamError(Exception):
+    """The response stream closed before the message finished."""
+
+
+_RETRYABLE_STATUS_CODES = {408, 409, 429}
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True for transient failures worth retrying.
+
+    Retries timeouts, connection drops, rate limits (429), server errors and
+    overload (5xx), and error events sent mid-stream after a 200 response.
+    Client errors such as a bad key (401), empty balance (402), or invalid
+    request (400/422) are permanent and fail immediately.
+
+    Args:
+        exc: The exception raised by the API call.
+
+    Returns:
+        True if the call should be retried.
+    """
+    if isinstance(exc, (anthropic.APIConnectionError, IncompleteStreamError)):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        code = exc.status_code
+        return code in _RETRYABLE_STATUS_CODES or code >= 500 or code < 400
+    return False
+
+
+def _stream_with_retry(
+    client: anthropic.Anthropic, max_attempts: int = 3, **kwargs
+) -> tuple[anthropic.types.Message, int]:
+    """Stream a message with exponential backoff on transient failures.
+
+    Args:
+        client:       Anthropic SDK client pointed at DeepSeek.
+        max_attempts: Total attempts before giving up.
+        **kwargs:     Forwarded to client.messages.stream.
+
+    Returns:
+        A (message, retries) tuple, where retries is the number of failed
+        attempts before the successful one.
+
+    Raises:
+        anthropic.APIError or IncompleteStreamError: If the error is permanent
+            or every attempt fails. The caller lets it reach the fatal-error
+            Slack alert.
+    """
     delay = 30
-    for attempt in range(max_retries):
+    for attempt in range(1, max_attempts + 1):
         try:
             with client.messages.stream(**kwargs) as stream:
-                return stream.get_final_message()
-        except anthropic.APIStatusError as exc:
-            if attempt < max_retries - 1 and "overloaded_error" in str(exc):
-                log.warning(
-                    "Anthropic API overloaded (attempt %d/%d); retrying in %ds...",
-                    attempt + 1, max_retries, delay,
+                try:
+                    message = stream.get_final_message()
+                except AssertionError:  # SDK asserts when the stream closes before message_start
+                    message = None
+            if message is None or message.stop_reason is None:
+                raise IncompleteStreamError("Response stream closed before the message finished")
+            return message, attempt - 1
+        except (anthropic.APIError, IncompleteStreamError) as exc:
+            if attempt == max_attempts or not _is_retryable(exc):
+                log.error(
+                    "DeepSeek call failed on attempt %d/%d (not retrying): %s",
+                    attempt, max_attempts, exc,
                 )
-                time.sleep(delay)
-                delay *= 2
-            else:
                 raise
+            log.warning(
+                "DeepSeek call failed on attempt %d/%d; retrying in %ds: %s",
+                attempt, max_attempts, delay, exc,
+            )
+            time.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")
+
+
+def _is_off_peak(now: datetime) -> bool:
+    """Return True if DeepSeek bills off-peak (half price) at the given time.
+
+    Peak is 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday. Chinese public
+    holidays are also off-peak but are not modelled, so the estimate can run
+    high on those days.
+
+    Args:
+        now: A timezone-aware datetime.
+
+    Returns:
+        True if the time falls outside DeepSeek's peak windows.
+    """
+    utc = now.astimezone(timezone.utc)
+    if utc.weekday() >= 5:
+        return True
+    return not (1 <= utc.hour < 4 or 6 <= utc.hour < 10)
+
+
+def _estimate_cost_usd(
+    model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int, off_peak: bool
+) -> float:
+    """Estimate the USD cost of DeepSeek usage from list prices.
+
+    Args:
+        model:               A key of _DEEPSEEK_PRICING.
+        input_tokens:        Input tokens that missed the cache.
+        cached_input_tokens: Input tokens served from the cache.
+        output_tokens:       Output tokens, including thinking.
+        off_peak:            Whether off-peak (half-price) rates apply.
+
+    Returns:
+        Estimated cost in USD.
+    """
+    price = _DEEPSEEK_PRICING[model]
+    cost = (
+        input_tokens * price["input"]
+        + cached_input_tokens * price["cached_input"]
+        + output_tokens * price["output"]
+    ) / 1_000_000
+    return cost / 2 if off_peak else cost
 
 
 def filter_events_with_llm(
@@ -370,39 +503,36 @@ def filter_events_with_llm(
     api_key: str,
     model: str,
 ) -> tuple[list[FilteredEvent], str, LLMUsage]:
-    """Filter events using an Anthropic LLM with a profile-specific system prompt.
+    """Filter events using a DeepSeek model with a profile-specific system prompt.
+
+    Both LLM calls use the same model. DeepSeek caches repeated prompt
+    prefixes automatically, so the shared system prompt needs no cache markup.
 
     Args:
         events:   Candidate events collected by the fetchers.
         keywords: Profile-specific keywords to match against.
         profile:  Active profile name ('tech' or 'fun'); selects the system prompt.
-        api_key:  Anthropic API key.
-        model:    Model ID to use for filtering.
+        api_key:  DeepSeek API key.
+        model:    DeepSeek model ID (a key of _DEEPSEEK_PRICING).
 
     Returns:
         A (filtered_events, model_id, llm_usage) tuple.
     """
     if not events:
-        empty_usage = LLMUsage(model_id=model, total_tokens=0, max_tokens=_MAX_TOKENS, budget_hit=False)
-        return [], "", empty_usage
+        return [], "", LLMUsage(model_id=model)
 
-    # Opus supports adaptive thinking; all other models require explicit budget.
-    thinking = (
-        {"type": "adaptive"}
-        if model.startswith("claude-opus")
-        else {"type": "enabled", "budget_tokens": 8000}
-    )
+    # The SDK's own silent retries are disabled so every retry is logged and counted.
+    client = anthropic.Anthropic(api_key=api_key, base_url=DEEPSEEK_BASE_URL, max_retries=0)
+    system_prompt = PROFILE_SYSTEM_PROMPTS[profile]
+    usage = LLMUsage(model_id=model, off_peak=_is_off_peak(datetime.now(timezone.utc)))
 
-    client = anthropic.Anthropic(api_key=api_key)
-
-    # Cache the system prompt — saves input tokens on the second API call.
-    cached_system: list[dict] = [
-        {
-            "type": "text",
-            "text": PROFILE_SYSTEM_PROMPTS[profile],
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
+    def record(resp: anthropic.types.Message, retries: int, max_tokens: int) -> None:
+        usage.model_id = resp.model
+        usage.input_tokens += resp.usage.input_tokens
+        usage.cached_input_tokens += resp.usage.cache_read_input_tokens or 0
+        usage.output_tokens += resp.usage.output_tokens
+        usage.budget_hit |= resp.stop_reason == "max_tokens" or resp.usage.output_tokens >= max_tokens
+        usage.retries += retries
 
     # Stage 1: keyword pre-filter — split into confirmed-relevant vs ambiguous.
     keyword_matched = [e for e in events if _matches_any_keyword(e, keywords)]
@@ -413,66 +543,105 @@ def filter_events_with_llm(
     )
 
     filtered: list[FilteredEvent] = []
-    resolved_model = model
-    total_input = 0
-    total_output = 0
-    budget_hit = False
 
-    # Stage 2a: summary-only call for keyword-matched events (no thinking needed).
+    # Stage 2a: summary-only call for keyword-matched events. DeepSeek thinks by
+    # default, so thinking must be disabled explicitly.
     if keyword_matched:
         log.info("Requesting summaries for %d pre-matched event(s)...", len(keyword_matched))
-        resp = _stream_with_retry(
+        resp, retries = _stream_with_retry(
             client,
-            model="claude-haiku-4-5-20251001",
+            model=model,
             max_tokens=_SUMMARY_MAX_TOKENS,
-            system=cached_system,
+            system=system_prompt,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": build_summary_prompt(keyword_matched)}],
         )
-        resolved_model = resp.model
-        total_input += resp.usage.input_tokens
-        total_output += resp.usage.output_tokens
-        budget_hit |= resp.usage.output_tokens >= _SUMMARY_MAX_TOKENS
+        record(resp, retries, _SUMMARY_MAX_TOKENS)
 
         raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
         log.debug("Summary response:\n%s", raw_text)
         parsed = _parse_llm_json(raw_text)
-        if parsed is not None:
-            filtered.extend(_build_filtered_events(parsed, keyword_matched))
+        if parsed is None:
+            usage.warnings.append(
+                f"Summary call returned invalid JSON — {len(keyword_matched)} "
+                "keyword-matched event(s) are missing from Part A."
+            )
+        else:
+            matched, unknown = _build_filtered_events(parsed, keyword_matched)
+            filtered.extend(matched)
+            if unknown:
+                usage.warnings.append(_unknown_titles_warning("Summary", unknown))
+            if len(matched) < len(keyword_matched):
+                usage.warnings.append(
+                    f"Summary call covered {len(matched)} of {len(keyword_matched)} "
+                    "keyword-matched event(s); the rest are missing from Part A."
+                )
 
     # Stage 2b: filter+summary call for unmatched events (with thinking).
+    # DeepSeek ignores budget_tokens; max_tokens caps thinking + answer together.
     if unmatched:
         log.info(
             "Sending %d unmatched event(s) to LLM for filtering (profile=%s, model=%s)...",
             len(unmatched), profile, model,
         )
-        resp = _stream_with_retry(
+        resp, retries = _stream_with_retry(
             client,
             model=model,
             max_tokens=_MAX_TOKENS,
-            system=cached_system,
-            thinking=thinking,
+            system=system_prompt,
+            thinking={"type": "enabled"},
             messages=[{"role": "user", "content": build_filter_prompt(unmatched, keywords)}],
         )
-        resolved_model = resp.model
-        total_input += resp.usage.input_tokens
-        total_output += resp.usage.output_tokens
-        budget_hit |= resp.usage.output_tokens >= _MAX_TOKENS
+        record(resp, retries, _MAX_TOKENS)
 
         raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
         log.debug("Filter response:\n%s", raw_text)
         parsed = _parse_llm_json(raw_text)
-        if parsed is not None:
-            filtered.extend(_build_filtered_events(parsed, unmatched))
+        if parsed is None:
+            usage.warnings.append(
+                f"Filter call returned invalid JSON — none of the {len(unmatched)} "
+                "non-keyword event(s) could be evaluated."
+            )
+        else:
+            matched, unknown = _build_filtered_events(parsed, unmatched)
+            filtered.extend(matched)
+            if unknown:
+                usage.warnings.append(_unknown_titles_warning("Filter", unknown))
 
-    llm_usage = LLMUsage(
-        model_id=resolved_model,
-        total_tokens=total_input + total_output,
-        max_tokens=_MAX_TOKENS,
-        budget_hit=budget_hit,
+    if usage.retries:
+        usage.warnings.append(
+            f"DeepSeek calls needed {usage.retries} retry(ies) — see the Actions log for errors."
+        )
+    usage.cost_usd = _estimate_cost_usd(
+        model, usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, usage.off_peak
     )
 
-    log.info("LLM approved %d / %d event(s).", len(filtered), len(events))
-    return filtered, resolved_model, llm_usage
+    log.info(
+        "LLM approved %d / %d event(s). Tokens: %d in, %d cached, %d out. Est. cost: $%.4f (%s).",
+        len(filtered), len(events), usage.input_tokens, usage.cached_input_tokens,
+        usage.output_tokens, usage.cost_usd, "off-peak" if usage.off_peak else "peak",
+    )
+    for warning in usage.warnings:
+        log.warning(warning)
+    return filtered, usage.model_id, usage
+
+
+def _unknown_titles_warning(call_name: str, titles: list[str]) -> str:
+    """Describe titles the model returned that matched no fetched event.
+
+    Args:
+        call_name: 'Summary' or 'Filter'.
+        titles:    The unmatched titles.
+
+    Returns:
+        A one-line warning for Part B diagnostics.
+    """
+    shown = "; ".join(f"“{t}”" for t in titles[:3])
+    more = f" (+{len(titles) - 3} more)" if len(titles) > 3 else ""
+    return (
+        f"{call_name} call returned {len(titles)} title(s) that matched no fetched "
+        f"event and were dropped: {shown}{more}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +668,8 @@ def format_slack_message(
         model:           Model ID used for filtering (shown in diagnostics).
         keywords:        Active keyword list (shown in Part A header).
         profile:         Active profile name (shown in digest header).
-        llm_usage:       Token usage metadata from the LLM call (shown in footer).
+        llm_usage:       Token usage, cost estimate, and warnings from the LLM
+                         calls (warnings in Part B, the rest in the footer).
 
     Returns:
         A dict representing the Slack Block Kit payload.
@@ -590,6 +760,9 @@ def format_slack_message(
                 f"{len(r.events)} in-area event(s)  _(raw: {r.raw_count})_"
             )
 
+    if llm_usage:
+        diag_lines.extend(f":warning: *LLM* — {w}" for w in llm_usage.warnings)
+
     blocks.append(
         {
             "type": "section",
@@ -618,9 +791,14 @@ def format_slack_message(
 
     if llm_usage:
         budget_label = "Hit" if llm_usage.budget_hit else "OK"
+        rate_label = "off-peak" if llm_usage.off_peak else "peak"
+        cost_label = f"${llm_usage.cost_usd:.4f}" if llm_usage.cost_usd >= 0.0001 else "<$0.0001"
         footer_text = (
             f":robot_face: `{llm_usage.model_id}` | "
-            f"Tokens: {llm_usage.total_tokens:,}/{llm_usage.max_tokens:,} | "
+            f"Tokens: {llm_usage.total_tokens:,} "
+            f"(in {llm_usage.input_tokens:,} · cached {llm_usage.cached_input_tokens:,} · "
+            f"out {llm_usage.output_tokens:,}) | "
+            f"Est. cost: {cost_label} ({rate_label}) | "
             f"Budget: {budget_label}"
         )
     else:
@@ -756,8 +934,8 @@ def main() -> None:
     profile = args.profile
 
     # Validate shared env vars.
-    if not ANTHROPIC_API_KEY:
-        log.error("Missing required environment variable: ANTHROPIC_API_KEY")
+    if not DEEPSEEK_API_KEY:
+        log.error("Missing required environment variable: DEEPSEEK_API_KEY")
         sys.exit(1)
 
     # Load profile-specific config (exits on missing webhook).
@@ -803,7 +981,7 @@ def main() -> None:
 
         # Step 2 — LLM filtering.
         filtered_events, model, llm_usage = filter_events_with_llm(
-            all_events, keywords, profile, ANTHROPIC_API_KEY, model
+            all_events, keywords, profile, DEEPSEEK_API_KEY, model
         )
 
         # Deduplicate LLM output — the model occasionally emits the same event twice.

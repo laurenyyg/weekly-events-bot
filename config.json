@@ -1,6 +1,6 @@
 {
-  "tech_model": "claude-opus-4-6",
-  "fun_model": "claude-sonnet-4-6",
+  "tech_model": "deepseek-v4-pro",
+  "fun_model": "deepseek-v4-pro",
   "tech_keywords": [
     "AI",
     "Machine Learning",

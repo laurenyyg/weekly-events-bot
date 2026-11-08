@@ -20,9 +20,14 @@
 - Credentials via `os.getenv` only. Never hardcode.
 
 ## LLM Configuration
-- **Filter+summary call**: Sonnet-class with extended thinking. Upgrade to Opus only if recall degrades; never downgrade to Haiku — precision will suffer.
-- **Summary-only call** (keyword-matched events): `claude-haiku-4-5-20251001`. No relevance judgment is made, so lower precision is acceptable.
-- **Thinking**: always enabled for the filter step (improves recall). Opus: `{"type": "adaptive"}`; Sonnet: `{"type": "enabled", "budget_tokens": <N>}`.
+- **Provider**: DeepSeek only, via its Anthropic-compatible endpoint (`DEEPSEEK_BASE_URL` in `main.py`) using the `anthropic` SDK. Key: `DEEPSEEK_API_KEY`. Never use Claude model IDs — DeepSeek silently remaps `claude-*` names to its own models instead of erroring.
+- **Model**: one per profile in `config.json` (currently `deepseek-v4-pro` for both; fallback `deepseek-v4-pro`), used for **both** LLM calls. Allowed IDs are the keys of `_DEEPSEEK_PRICING`; anything else exits at startup. Don't move the filter call to `deepseek-flash` without comparing recall first.
+- **Summary-only call** (keyword-matched events): thinking must be explicitly `{"type": "disabled"}` — DeepSeek thinks by default.
+- **Filter+summary call**: `{"type": "enabled"}` (improves recall). DeepSeek ignores `budget_tokens` and treats `adaptive` as `enabled`; `max_tokens` caps thinking + answer together.
+- **Prompt caching**: automatic on DeepSeek; no `cache_control` markup. Both calls share the system prompt prefix and model, so the second call can hit the cache.
+- **Retries**: `_stream_with_retry` owns all retries (SDK `max_retries=0`). It retries 408/409/429/5xx, connection errors, and incomplete streams; it fails fast on 400/401/402/422. Final failures reach the fatal-error Slack alert.
+- **No silent drops**: invalid JSON, unmatched titles, missing summaries, and retries are added to `LLMUsage.warnings` and shown in Part B.
+- **Cost**: `_DEEPSEEK_PRICING` holds peak list prices (USD/1M tokens); off-peak is half. Keep scheduled runs off-peak (outside Mon–Fri 01:00–04:00 and 06:00–10:00 UTC). Update the table when DeepSeek changes prices.
 - **Goal**: High Recall at fetch/filter; High Precision in the final Slack digest.
 
 ## Slack Formatting
@@ -33,7 +38,9 @@
   _LLM-generated summary_
   ```
 - Three parts: **Part A** (curated events), **Part B** (diagnostics), **footer** (metadata).
-- Footer format: `_Model: [model_id] | Tokens: [total_used]/[max_tokens] | Budget: [OK/Hit]_`
+- Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit]`
+  - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices.
+- LLM warnings appear in Part B as `:warning: *LLM* — …` lines.
 - Tech profile footer also includes the Luma iCal completeness reminder.
 - Language: professional, concise, English only.
 
