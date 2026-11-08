@@ -7,6 +7,7 @@ can be verified without network access. Run with:
     pytest tests/test_luma_fetcher.py -v
 """
 
+import json
 from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pytest
 import requests
 
-from fetchers.luma_fetcher import LumaFetcher
+from fetchers.luma_fetcher import LumaFetcher, _extract_description_body, parse_luma_description
 
 START = date(2026, 11, 9)
 END = date(2026, 11, 22)
@@ -112,6 +113,50 @@ def test_empty_feed_is_flagged() -> None:
     with patch("fetchers.luma_fetcher.requests.get", return_value=_response(_feed())):
         assert fetcher.fetch_events(START, END) == []
     assert not fetcher.empty_ok
+
+
+def _event_page(mirror: dict | None, meta: str = "") -> str:
+    data = {"props": {"pageProps": {"initialData": {"data": {"description_mirror": mirror}}}}}
+    return (
+        f'<html><head><meta name="description" content="{meta}"></head><body>'
+        f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(data)}</script></body></html>'
+    )
+
+
+MIRROR = {"type": "doc", "content": [
+    {"type": "paragraph", "content": [
+        {"type": "text", "text": "Monthly "},
+        {"type": "text", "text": "AI", "marks": [{"type": "bold"}]},
+        {"type": "text", "text": "s meetup."},
+    ]},
+    {"type": "paragraph", "content": [{"type": "text", "text": "Pizza provided."}]},
+]}
+
+
+def test_description_read_from_page_data() -> None:
+    assert parse_luma_description(_event_page(MIRROR)) == "Monthly AIs meetup. Pizza provided."
+
+
+def test_description_falls_back_to_meta() -> None:
+    assert parse_luma_description(_event_page(None, meta="Short &amp; sweet…")) == "Short & sweet…"
+
+
+def test_boilerplate_only_description_is_empty() -> None:
+    raw = "Get up-to-date information at: https://luma.com/x\n\nAddress:\nAnd-Co Offices\nVancouver, BC"
+    assert _extract_description_body(raw) == ""
+
+
+def test_feed_without_body_gets_description_from_event_page() -> None:
+    vevent = _vevent("fv-ai", "FV + AI", "20261112T020000Z").replace(
+        "\\n\\nA talk about FV + AI.", ""
+    )
+    page = MagicMock(text=_event_page(MIRROR))
+    page.raise_for_status.return_value = None
+    with patch("fetchers.luma_fetcher.requests.get", return_value=_response(_feed(vevent))), \
+         patch("fetchers.base.requests.Session") as session_cls:
+        session_cls.return_value.__enter__.return_value.get.return_value = page
+        events = LumaFetcher("BC + AI Events", "cal-abc").fetch_events(START, END)
+    assert events[0].description == "Monthly AIs meetup. Pizza provided."
 
 
 def test_http_error_propagates() -> None:

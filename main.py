@@ -748,6 +748,11 @@ def filter_events_with_llm(
             if unknown:
                 usage.warnings.append(_unknown_titles_warning("Filter", unknown))
 
+    blank = [fe.event.title for fe in filtered if not str(fe.summary).strip()]
+    if blank:
+        usage.warnings.append(
+            f"{len(blank)} approved event(s) came back with no summary: {', '.join(blank)}"
+        )
     if usage.retries:
         usage.warnings.append(
             f"DeepSeek calls needed {usage.retries} retry(ies) — see the Actions log for errors."
@@ -990,7 +995,7 @@ def format_slack_message(
             event_text = (
                 f"*<{first.event.url}|{first.event.title}>*\n"
                 + "\n".join(date_lines)
-                + f"\n_{first.summary}_"
+                + (f"\n_{first.summary}_" if first.summary.strip() else "")
             )
             blocks.append(
                 {"type": "section", "text": {"type": "mrkdwn", "text": event_text}}

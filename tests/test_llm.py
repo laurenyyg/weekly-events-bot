@@ -427,6 +427,12 @@ def test_quiet_calendar_is_not_an_issue() -> None:
     assert "issue(s)" not in text
 
 
+def test_blank_summary_renders_without_empty_italics() -> None:
+    blocks = _part_a_texts([main.FilteredEvent(event=_event("FV + AI"), summary="")])
+    assert blocks[0].endswith("Vancouver")
+    assert "__" not in blocks[0]
+
+
 def test_tech_footer_has_calendar_discovery_reminder() -> None:
     payload = main.format_slack_message(
         [], [], date(2026, 11, 9), date(2026, 11, 22), "deepseek-v4-pro", ["AI"], "tech",

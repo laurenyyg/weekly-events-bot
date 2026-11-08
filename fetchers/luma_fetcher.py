@@ -7,6 +7,8 @@ reverse-engineered discovery API). Calendar IDs live in config.json under
 `tech_luma_calendars`.
 """
 
+import html as html_lib
+import json
 import logging
 import re
 from datetime import date, datetime
@@ -15,11 +17,16 @@ from zoneinfo import ZoneInfo
 import requests
 from icalendar import Calendar
 
-from .base import BaseEventFetcher, Event
+from .base import BaseEventFetcher, Event, fill_descriptions
 
 logger = logging.getLogger(__name__)
 
 _ICAL_URL = "https://api2.luma.com/ics/get?entity=calendar&id={calendar_id}"
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 _VANCOUVER_TZ = ZoneInfo("America/Vancouver")
 
 # Bounding box for Metro Vancouver (excludes Nanaimo, Victoria, Whistler, etc.)
@@ -96,19 +103,56 @@ def _extract_description_body(description: str) -> str:
     Args:
         description: Raw DESCRIPTION string from the VEVENT.
 
+    Calendar feeds usually omit the body, and the Address or Hosted-by
+    paragraph may be last, so each boilerplate paragraph is dropped wherever
+    it appears.
+
     Returns:
-        The event body text with whitespace normalised.
+        The event body text with whitespace normalised, or "" if there is none.
     """
-    # Drop everything up to and including the Address block.
-    body = re.split(r"Address:\n.*?\n\n", description, maxsplit=1, flags=re.DOTALL)
-    text = body[-1]  # everything after the address block (or full text if no match)
+    paragraphs = description.replace("\\n", "\n").split("\n\n")
+    body = [
+        p for p in paragraphs
+        if not p.strip().startswith(("Get up-to-date information at:", "Address:", "Hosted by "))
+    ]
+    return " ".join(" ".join(body).split())
 
-    # Drop trailing "Hosted by …" line.
-    text = re.sub(r"\s*Hosted by .+$", "", text, flags=re.DOTALL)
 
-    # Normalise Luma's escaped newlines and extra whitespace.
-    text = text.replace("\\n", " ").strip()
-    return " ".join(text.split())
+def _mirror_text(node) -> str:
+    """Flatten a Luma description_mirror (ProseMirror) node into plain text."""
+    if not isinstance(node, dict):
+        return ""
+    if node.get("type") == "text":
+        return node.get("text", "")
+    # Block nodes (paragraphs, headings, list items) end with a space so
+    # adjacent blocks don't run together; inline text joins as-is.
+    return "".join(_mirror_text(c) for c in node.get("content") or []) + " "
+
+
+def parse_luma_description(page_html: str) -> str:
+    """Return an event's description from its Luma event page.
+
+    Calendar iCal feeds omit the description body, so it is read from the
+    page's embedded Next.js data, falling back to the meta description
+    (which Luma truncates).
+
+    Args:
+        page_html: HTML of a luma.com event page.
+
+    Returns:
+        The description with whitespace normalised, or "" if none is found.
+    """
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page_html, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))["props"]["pageProps"]["initialData"]["data"]
+            text = " ".join(_mirror_text(data.get("description_mirror")).split())
+            if text:
+                return text
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    meta = re.search(r'<meta[^>]+name="description"[^>]+content="([^"]*)"', page_html)
+    return " ".join(html_lib.unescape(meta.group(1)).split()) if meta else ""
 
 
 def _parse_location(vevent) -> str:
@@ -150,7 +194,8 @@ class LumaFetcher(BaseEventFetcher):
         """Fetch this calendar's Metro Vancouver events in the date range.
 
         Downloads the iCal feed, filters by date window, Metro Vancouver
-        bounding box, and postponed/cancelled status.
+        bounding box, and postponed/cancelled status, then reads each kept
+        event's description from its event page.
 
         Args:
             start_date: First day of the range (inclusive).
@@ -234,6 +279,8 @@ class LumaFetcher(BaseEventFetcher):
                     tags=[],
                 )
             )
+
+        fill_descriptions(events, parse_luma_description, _HEADERS, self.name)
 
         self.raw_count = raw
         logger.info(
