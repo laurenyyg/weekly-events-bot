@@ -1144,7 +1144,7 @@ def post_fatal_error_to_slack(error: Exception, webhook_url: str) -> None:
     """
     tb = traceback.format_exc()
     payload = {
-        "text": "Vancouver Events Bot — FATAL ERROR, no digest posted",
+        "text": "Vancouver Events Bot — FATAL ERROR, digest missing or incomplete",
         "blocks": [
             {
                 "type": "section",
@@ -1152,7 +1152,7 @@ def post_fatal_error_to_slack(error: Exception, webhook_url: str) -> None:
                     "type": "mrkdwn",
                     "text": (
                         ":rotating_light: *Vancouver Events Bot — FATAL ERROR* :rotating_light:\n"
-                        f"The bot crashed and no digest was posted.\n"
+                        "The bot crashed, so the digest was not posted or is incomplete.\n"
                         f"*Error:* `{type(error).__name__}: {error}`"
                     ),
                 },
@@ -1206,16 +1206,87 @@ def post_config_errors_to_slack(errors: list[str], profile: str, webhook_url: st
         log.error("Could not send config-error alert to Slack: %s", slack_exc)
 
 
+_SLACK_MAX_BLOCKS = 50  # Slack rejects a whole message with more blocks
+_SLACK_POST_INTERVAL_S = 1.0  # incoming webhooks allow ~1 message/second
+_CONT_PREFIX = "(cont.) "
+
+
+def split_slack_payload(payload: dict, max_blocks: int = _SLACK_MAX_BLOCKS) -> list[dict]:
+    """Split a Block Kit payload into messages that each fit Slack's block limit.
+
+    Works on any payload, so every profile gets the same rule. Blocks keep
+    their order and are never cut, so an event is never split. Everything from
+    the last divider on (Part B and the footer) stays together in the last
+    message. Each follow-up message starts with a header reading
+    "(cont.) <original header>" and uses the same prefix for its preview text.
+
+    Args:
+        payload:    A payload with "text" and "blocks", e.g. from format_slack_message().
+        max_blocks: Most blocks allowed per message.
+
+    Returns:
+        One or more payloads, in posting order. A payload that already fits is
+        returned unchanged as the only item.
+    """
+    blocks: list[dict] = payload["blocks"]
+    if len(blocks) <= max_blocks:
+        return [payload]
+
+    header = next((b for b in blocks if b.get("type") == "header"), None)
+    title = header["text"]["text"] if header else payload["text"]
+    cont_title = f"{_CONT_PREFIX}{title}"
+    cont_header = {"type": "header", "text": {"type": "plain_text", "text": cont_title[:150], "emoji": True}}
+
+    last_divider = max((i for i, b in enumerate(blocks) if b.get("type") == "divider"), default=len(blocks))
+    body, tail = blocks[:last_divider], blocks[last_divider:]
+    if len(tail) >= max_blocks:  # no usable tail; split everything evenly
+        body, tail = blocks, []
+
+    chunks: list[list[dict]] = [[]]
+    for block in body:
+        if len(chunks[-1]) >= max_blocks:
+            chunks.append([cont_header])
+        chunks[-1].append(block)
+    if tail:
+        if len(chunks[-1]) + len(tail) > max_blocks:
+            chunks.append([cont_header])
+        chunks[-1].extend(tail)
+
+    return [
+        {"text": payload["text"] if i == 0 else cont_title, "blocks": chunk}
+        for i, chunk in enumerate(chunks)
+    ]
+
+
 def post_to_slack(payload: dict, webhook_url: str) -> None:
-    log.info("Posting to Slack...")
-    resp = requests.post(
-        webhook_url,
-        json=payload,
-        timeout=10,
-        headers={"Content-Type": "application/json"},
-    )
-    resp.raise_for_status()
-    log.info("Slack response: %s", resp.text)
+    """Post a digest, split into several messages if it exceeds Slack's block limit.
+
+    Args:
+        payload:     Block Kit payload from format_slack_message().
+        webhook_url: Slack incoming webhook URL.
+
+    Raises:
+        RuntimeError: If any message is rejected; says how many were already posted.
+    """
+    messages = split_slack_payload(payload)
+    log.info("Posting to Slack (%d message(s), %d block(s))...", len(messages), len(payload["blocks"]))
+    for i, message in enumerate(messages):
+        if i:
+            time.sleep(_SLACK_POST_INTERVAL_S)
+        try:
+            resp = requests.post(
+                webhook_url,
+                json=message,
+                timeout=10,
+                headers={"Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Slack rejected digest message {i + 1} of {len(messages)} "
+                f"({i} already posted): {exc}"
+            ) from exc
+        log.info("Slack response (%d/%d): %s", i + 1, len(messages), resp.text)
 
 
 # ---------------------------------------------------------------------------

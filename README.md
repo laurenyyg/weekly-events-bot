@@ -7,7 +7,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 1. **Fetchers** collect events from configured sources for the upcoming two-week window
 2. **Keyword pre-filter** — events with a whole-word keyword match in title, description, or tags are auto-included and sent to the LLM for a summary only (thinking disabled)
 3. **LLM filtering** evaluates the remaining ambiguous events against profile-specific keywords with thinking enabled, and writes a one- or two-sentence recommendation for each approved event. Both LLM calls use the profile's DeepSeek model from `config.json` (`deepseek-v4-pro` by default) through DeepSeek's Anthropic-compatible API. DeepSeek caches the shared system prompt automatically. The summary call puts its instructions after the event list, because with thinking disabled the model tends to copy a long trailing list back instead of summarizing it. It retries once if the reply is invalid JSON or any event comes back without a summary. If the last reply still lacks summaries, those events stay in Part A without a blurb and Part B names them; if it is still invalid JSON, the auto-included events are left out and Part B says so.
-4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B, including fetcher problems, LLM warnings such as invalid JSON, missing summaries, dropped titles, or retries, and cost or balance alerts), and a metadata footer showing the model, token counts (input, cached input, output), estimated cost, whether the output budget was hit, and the remaining DeepSeek balance. The `tech` footer also notes which sources were polled and how to find more Luma calendars. If anything went wrong, a one-line banner under the header and the Slack notification text say how many issues to check in Part B.
+4. **Slack digest** is posted in three parts: curated events (Part A), system diagnostics (Part B, including fetcher problems, LLM warnings such as invalid JSON, missing summaries, dropped titles, or retries, and cost or balance alerts), and a metadata footer showing the model, token counts (input, cached input, output), estimated cost, whether the output budget was hit, and the remaining DeepSeek balance. The `tech` footer also notes which sources were polled and how to find more Luma calendars. If anything went wrong, a one-line banner under the header and the Slack notification text say how many issues to check in Part B. A digest longer than Slack's 50-block limit (about 40 events) is posted as several messages, for every profile: follow-ups start with a "(cont.)" header, and Part B and the footer always come last.
 
 ## Alerts
 
@@ -20,6 +20,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 | Config mistake (unreadable `config.json`, missing `DEEPSEEK_API_KEY`, non-DeepSeek model, no keywords, no Luma calendars for `tech`) | CONFIG ERROR alert, no digest | Red (failure email) |
 | Missing Slack webhook, or Slack itself is down | Nothing | Red (failure email) |
 | Run cost above `cost_alarm_usd` / balance below `low_balance_usd` | Digest posts, with a Part B alert | Green |
+| Slack rejects one part of a split digest | Earlier parts stay posted; FATAL ERROR alert says how many went out | Red (failure email) |
 
 ## Profiles
 

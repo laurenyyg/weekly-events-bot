@@ -53,6 +53,7 @@
   ```
 - Part A is sorted by date, then time (`TBD` last within its day). Repeat showings of the same title merge into one entry: one `:date:` line per showing, then the earliest showing's summary.
 - Three parts: **Part A** (curated events), **Part B** (diagnostics), **footer** (metadata).
+- **Splitting (all profiles)**: Slack rejects a whole message over 50 blocks, so `post_to_slack()` runs every payload through `split_slack_payload()`. Blocks are never cut (one event = one block); everything from the last divider on (Part B + footer) stays together in the last message; follow-ups start with a `(cont.) <title>` header and the same preview text. Messages post ~1s apart; a failed part raises with the count already posted (→ fatal alert). Keep each Part A event a single block so this holds.
 - Part B's funnel line shows `Auto-included: N · LLM-judged: M` before `LLM approved` (Auto-included = keyword matches + pre-approved events), so a pre-filter that matches too much is visible at a glance.
 - Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit] | Balance: $[usd]`
   - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices. Balance is omitted if it couldn't be fetched.
