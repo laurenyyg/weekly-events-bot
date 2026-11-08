@@ -1111,7 +1111,7 @@ def format_slack_message(
             "text": (
                 f":information_source: Events come from the {len(_CONFIG.get('tech_luma_calendars', {}))} "
                 "Luma calendars listed under `tech_luma_calendars` in config.json, plus Cerebral "
-                "Valley's remote AI events (10 AM–8 PM starts). "
+                "Valley's remote and Vancouver AI events and hackathons. "
                 "To discover more, browse <https://luma.com/vancouver|luma.com/vancouver> or open a tech "
                 "event you liked, click its host to reach their calendar page, and add that calendar's "
                 "`cal-…` ID (in the page source) to config.json."

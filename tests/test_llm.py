@@ -498,7 +498,7 @@ def test_tech_footer_has_calendar_discovery_reminder() -> None:
     text = json.dumps(payload, ensure_ascii=False)
     count = len(main._CONFIG["tech_luma_calendars"])
     assert f"Events come from the {count} Luma calendars" in text
-    assert "Cerebral Valley's remote AI events" in text
+    assert "Cerebral Valley's remote and Vancouver AI events" in text
     assert "To discover more" in text
 
 

@@ -1,11 +1,11 @@
 """
-Cerebral Valley fetcher for remote AI events.
+Cerebral Valley fetcher for remote and Vancouver AI events.
 
-Reads the public JSON API behind cerebralvalley.ai/events (no key needed).
-Cerebral Valley has no Vancouver location, so only remote events are pulled,
-and only those starting at a reasonable Vancouver hour are kept. Every event
-is AI-related, so kept events are marked pre_approved and skip keyword
-matching.
+Reads the public JSON API behind cerebralvalley.ai/events and
+cerebralvalley.ai/hackathons (no key needed). Two pulls: remote events (kept
+if they start at a reasonable Vancouver hour or run 24h+, e.g. multi-day
+hackathons) and events located in Vancouver. Every event is AI-related, so
+kept events are marked pre_approved and skip keyword matching.
 """
 
 import logging
@@ -25,13 +25,18 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 20
 _DESCRIPTION_MAX_CHARS = 500
 
-# Keep events starting between 10:00 and 20:00 Vancouver time, inclusive.
+# Keep remote events starting between 10:00 and 20:00 Vancouver time,
+# inclusive, unless they run at least _LONG_EVENT (start hour is moot then).
 _EARLIEST = 10 * 60
 _LATEST = 20 * 60
+_LONG_EVENT = timedelta(hours=24)
 
 # The REMOTE filter also returns some "Other" events, which have turned out
 # to be in-person events elsewhere.
 _EXCLUDED_LOCATIONS = {"Other"}
+
+# `locations=Vancouver` is a text match, so it could also return Vancouver, WA.
+_US_VANCOUVER_MARKERS = (", WA", "Washington")
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -55,40 +60,50 @@ def _iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-class CerebralValleyFetcher(BaseEventFetcher):
-    """Fetches remote AI events from Cerebral Valley."""
+def _is_long(item: dict, starts: datetime) -> bool:
+    """True if the event runs at least _LONG_EVENT; a missing or bad end counts as short."""
+    try:
+        return _parse_utc(item["endDateTime"]) - starts >= _LONG_EVENT
+    except (KeyError, TypeError, ValueError):
+        return False
 
-    name = "Cerebral Valley (remote)"
+
+class CerebralValleyFetcher(BaseEventFetcher):
+    """Fetches remote and Vancouver AI events (incl. hackathons) from Cerebral Valley."""
+
+    name = "Cerebral Valley (remote + Vancouver)"
 
     def __init__(self) -> None:
         self.raw_count = 0
         self.empty_ok = False
 
-    def _pull(self, start: datetime, end: datetime) -> list[dict]:
-        """Return every remote event the API lists for [start, end), across pages."""
+    def _pull(self, session: requests.Session, location: str,
+              start: datetime, end: datetime) -> list[dict]:
+        """Return every event the API lists at `location` for [start, end), across pages."""
         events: list[dict] = []
-        with requests.Session() as session:
-            session.headers.update(_HEADERS)
-            for page in range(_MAX_PAGES):
-                resp = session.get(_API_URL, params={
-                    "approved": "true",
-                    "locations": "REMOTE",
-                    "startDateTime": _iso_utc(start),
-                    "endDateTime": _iso_utc(end),
-                    "limit": _PAGE_SIZE,
-                    "offset": page * _PAGE_SIZE,
-                }, timeout=15)
-                resp.raise_for_status()
-                data = resp.json()
-                if not isinstance(data.get("events"), list):
-                    raise ValueError("Cerebral Valley response has no 'events' list")
-                events.extend(data["events"])
-                if data.get("lastPage", True) or not data["events"]:
-                    break
+        for page in range(_MAX_PAGES):
+            resp = session.get(_API_URL, params={
+                "approved": "true",
+                "locations": location,
+                "startDateTime": _iso_utc(start),
+                "endDateTime": _iso_utc(end),
+                "limit": _PAGE_SIZE,
+                "offset": page * _PAGE_SIZE,
+            }, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data.get("events"), list):
+                raise ValueError("Cerebral Valley response has no 'events' list")
+            events.extend(data["events"])
+            if data.get("lastPage", True) or not data["events"]:
+                break
         return events
 
     def fetch_events(self, start_date: date, end_date: date) -> list[Event]:
-        """Fetch remote events starting in the date range at 10:00–20:00 Vancouver time.
+        """Fetch remote and Vancouver events starting in the date range.
+
+        Remote events must start 10:00–20:00 Vancouver time unless they run
+        24h or longer. Vancouver events have no start-hour rule.
 
         Args:
             start_date: First day of the range (inclusive).
@@ -98,18 +113,26 @@ class CerebralValleyFetcher(BaseEventFetcher):
             A list of Event objects, all marked pre_approved.
 
         Raises:
-            requests.RequestException or ValueError: If the API call fails or
+            requests.RequestException or ValueError: If an API call fails or
                 returns an unexpected shape. The orchestrator reports it in Part B.
         """
         start = datetime.combine(start_date, time.min, tzinfo=_VANCOUVER_TZ)
         end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=_VANCOUVER_TZ)
 
-        listed = self._pull(start, end)
+        with requests.Session() as session:
+            session.headers.update(_HEADERS)
+            remote = self._pull(session, "REMOTE", start, end)
+            local = self._pull(session, "Vancouver", start, end)
         self.empty_ok = True
 
         events: list[Event] = []
+        seen: set[str] = set()
         raw = 0
-        for item in listed:
+        for item, is_remote in [(i, True) for i in remote] + [(i, False) for i in local]:
+            key = str(item.get("id") or (item.get("url"), item.get("startDateTime")))
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 starts = _parse_utc(item["startDateTime"]).astimezone(_VANCOUVER_TZ)
             except (KeyError, TypeError, ValueError):
@@ -119,12 +142,21 @@ class CerebralValleyFetcher(BaseEventFetcher):
                 continue  # ongoing events that began before the window
             raw += 1
 
-            if item.get("location") in _EXCLUDED_LOCATIONS:
-                logger.info("[%s] Skipping non-remote event: %s", self.name, item.get("name"))
-                continue
-            minutes = starts.hour * 60 + starts.minute
-            if not (_EARLIEST <= minutes <= _LATEST):
-                continue
+            location = str(item.get("location") or "")
+            venue = str(item.get("venue") or "")
+            if is_remote:
+                if location in _EXCLUDED_LOCATIONS:
+                    logger.info("[%s] Skipping non-remote event: %s", self.name, item.get("name"))
+                    continue
+                minutes = starts.hour * 60 + starts.minute
+                if not (_EARLIEST <= minutes <= _LATEST or _is_long(item, starts)):
+                    continue
+                where = "Online"
+            else:
+                if any(m in f"{location} {venue}" for m in _US_VANCOUVER_MARKERS):
+                    logger.info("[%s] Skipping Vancouver, WA event: %s", self.name, item.get("name"))
+                    continue
+                where = venue or location or "Vancouver"
 
             description = item.get("description") or item.get("descriptionSummary") or ""
             hour = starts.strftime("%I").lstrip("0") or "12"
@@ -133,7 +165,7 @@ class CerebralValleyFetcher(BaseEventFetcher):
                     title=str(item.get("name", "Untitled Event")),
                     date=starts.strftime("%Y-%m-%d"),
                     time=hour + starts.strftime(":%M %p"),
-                    location="Online",
+                    location=where,
                     description=" ".join(description.split())[:_DESCRIPTION_MAX_CHARS],
                     url=_strip_query(str(item.get("url", ""))),
                     source=self.name,
@@ -144,7 +176,7 @@ class CerebralValleyFetcher(BaseEventFetcher):
 
         self.raw_count = raw
         logger.info(
-            "[%s] listed=%d  in-range=%d  kept=%d  for %s → %s",
-            self.name, len(listed), raw, len(events), start_date, end_date,
+            "[%s] listed=%d remote + %d Vancouver  in-range=%d  kept=%d  for %s → %s",
+            self.name, len(remote), len(local), raw, len(events), start_date, end_date,
         )
         return events

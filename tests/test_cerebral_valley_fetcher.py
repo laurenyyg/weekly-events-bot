@@ -28,8 +28,10 @@ def _utc_for_local(day: int, hour: int, minute: int = 0) -> str:
 
 
 def _item(name: str, start: str, location: str = "Remote", description: str = "About it.",
-          url: str = "https://luma.com/abc?tab=guest-list") -> dict:
-    return {"name": name, "startDateTime": start, "endDateTime": start, "location": location,
+          url: str = "https://luma.com/abc?tab=guest-list", end: str | None = None,
+          venue: str | None = None) -> dict:
+    return {"id": f"{name}|{start}", "name": name, "startDateTime": start,
+            "endDateTime": end or start, "location": location, "venue": venue,
             "description": description, "descriptionSummary": "Summary.", "url": url}
 
 
@@ -40,11 +42,13 @@ def _page(events: list[dict], last: bool = True) -> MagicMock:
     return resp
 
 
-def _fetch(*pages: MagicMock) -> tuple[CerebralValleyFetcher, list, MagicMock]:
+def _fetch(*remote_pages: MagicMock, vancouver: tuple[MagicMock, ...] = ()
+           ) -> tuple[CerebralValleyFetcher, list, MagicMock]:
+    """Run the fetcher; remote pages are served first, then Vancouver pages (default: empty)."""
     fetcher = CerebralValleyFetcher()
     with patch("fetchers.cerebral_valley_fetcher.requests.Session") as session_cls:
         get = session_cls.return_value.__enter__.return_value.get
-        get.side_effect = list(pages)
+        get.side_effect = list(remote_pages) + list(vancouver or (_page([]),))
         events = fetcher.fetch_events(START, END)
     return fetcher, events, get
 
@@ -55,11 +59,11 @@ def test_local_time_conversion_and_fields() -> None:
     assert (e.date, e.time) == ("2026-11-09", "11:00 AM")
     assert e.location == "Online"
     assert e.url == "https://luma.com/abc"
-    assert e.source == "Cerebral Valley (remote)"
+    assert e.source == "Cerebral Valley (remote + Vancouver)"
     assert e.pre_approved
-    params = get.call_args.kwargs["params"]
-    assert params["locations"] == "REMOTE"
-    assert params["startDateTime"].endswith("Z")
+    locations = [c.kwargs["params"]["locations"] for c in get.call_args_list]
+    assert locations == ["REMOTE", "Vancouver"]
+    assert get.call_args.kwargs["params"]["startDateTime"].endswith("Z")
 
 
 def test_start_hour_boundaries() -> None:
@@ -70,6 +74,34 @@ def test_start_hour_boundaries() -> None:
         _item("Too late", _utc_for_local(10, 20, 1)),
     ]))
     assert [e.title for e in events] == ["Opens", "Closes"]
+
+
+def test_long_remote_event_skips_start_hour_rule() -> None:
+    _, events, _ = _fetch(_page([
+        _item("NASA Space Apps", _utc_for_local(14, 7), end=_utc_for_local(15, 14)),
+        _item("Short early workshop", _utc_for_local(14, 7), end=_utc_for_local(14, 9)),
+    ]))
+    assert [e.title for e in events] == ["NASA Space Apps"]
+
+
+def test_vancouver_events_kept_at_any_hour_with_venue() -> None:
+    _, events, _ = _fetch(_page([]), vancouver=(_page([
+        _item("AI Skills Workshop", _utc_for_local(11, 16, 30), location="Vancouver, Canada",
+              venue="177 E 3rd Ave"),
+        _item("Late Builders Night", _utc_for_local(12, 21), location="Vancouver, Canada"),
+        _item("PDX AI Meetup", _utc_for_local(12, 18), location="Vancouver, WA"),
+    ]),))
+    assert [(e.title, e.location) for e in events] == [
+        ("AI Skills Workshop", "177 E 3rd Ave"),
+        ("Late Builders Night", "Vancouver, Canada"),
+    ]
+    assert all(e.pre_approved for e in events)
+
+
+def test_event_in_both_pulls_kept_once() -> None:
+    item = _item("Hybrid Hack", _utc_for_local(12, 12))
+    _, events, _ = _fetch(_page([item]), vancouver=(_page([item]),))
+    assert [e.title for e in events] == ["Hybrid Hack"]
 
 
 def test_ongoing_and_other_location_dropped() -> None:
@@ -89,7 +121,7 @@ def test_pages_until_last_page() -> None:
         _page([_item("Second", _utc_for_local(12, 12))], last=True),
     )
     assert [e.title for e in events] == ["First", "Second"]
-    assert [c.kwargs["params"]["offset"] for c in get.call_args_list] == [0, 100]
+    assert [c.kwargs["params"]["offset"] for c in get.call_args_list] == [0, 100, 0]
 
 
 def test_description_capped_with_summary_fallback() -> None:
