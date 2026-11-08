@@ -408,19 +408,27 @@ def build_summary_prompt(events: list[Event]) -> str:
     Args:
         events: Events that passed the keyword pre-filter.
 
+    The instructions come after the events: without thinking, a prompt that
+    ends in a long JSON array gets echoed back instead of answered.
+
     Returns:
         A prompt string asking the LLM only to write summaries, not to filter.
     """
-    return f"""These events are already confirmed relevant. For each, write a recommendation of {_SUMMARY_LENGTH} explaining why someone interested should attend. {_GROUNDING_RULES}
+    return f"""Events:
+{_slim_events_json(events)}
 
-Return a JSON array where each object has:
+These events are already confirmed relevant. For each event above, write a recommendation of {_SUMMARY_LENGTH} explaining why someone interested should attend. {_GROUNDING_RULES}
+
+Return a JSON array with one object per event. Each object must have ONLY these keys:
 - "title": string (exact title from input)
 - "summary": string (your recommendation)
 
-Respond with ONLY the JSON array, no markdown fences, no extra text.
+Do not repeat the venue, description, or tags. Respond with ONLY the JSON array, no markdown fences, no extra text."""
 
-Events:
-{_slim_events_json(events)}"""
+
+def _has_summaries(parsed: list[dict]) -> bool:
+    """Return True if every parsed item carries a non-empty summary."""
+    return all(str(item.get("summary") or "").strip() for item in parsed)
 
 
 def _parse_llm_json(raw_text: str) -> list[dict] | None:
@@ -683,8 +691,10 @@ def filter_events_with_llm(
 
     # Stage 2a: summary-only call for keyword-matched events. DeepSeek thinks by
     # default, so thinking must be disabled explicitly. Without thinking the
-    # model occasionally emits malformed JSON, and the call is cheap, so a
-    # parse failure gets one more attempt.
+    # model occasionally emits malformed JSON or echoes the input without
+    # summaries, and the call is cheap, so either gets one more attempt. An
+    # echo on the last attempt is still used, so the events stay in Part A
+    # and the blank-summary warning names them.
     if keyword_matched:
         log.info("Requesting summaries for %d pre-matched event(s)...", len(keyword_matched))
         parsed = None
@@ -701,11 +711,16 @@ def filter_events_with_llm(
 
             raw_text = next((b.text for b in resp.content if b.type == "text"), "").strip()
             log.debug("Summary response:\n%s", raw_text)
-            parsed = _parse_llm_json(raw_text)
-            if parsed is not None:
-                break
-            log.warning("Summary call returned invalid JSON (attempt %d of %d).",
-                        attempt, _SUMMARY_ATTEMPTS)
+            attempt_parsed = _parse_llm_json(raw_text)
+            if attempt_parsed is not None:
+                parsed = attempt_parsed
+                if _has_summaries(parsed):
+                    break
+                log.warning("Summary call returned items without summaries (attempt %d of %d).",
+                            attempt, _SUMMARY_ATTEMPTS)
+            else:
+                log.warning("Summary call returned invalid JSON (attempt %d of %d).",
+                            attempt, _SUMMARY_ATTEMPTS)
         if parsed is None:
             usage.warnings.append(
                 f"Summary call returned invalid JSON {_SUMMARY_ATTEMPTS} times — {len(keyword_matched)} "

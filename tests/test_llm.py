@@ -237,6 +237,46 @@ def test_summary_invalid_json_twice_is_flagged(anthropic_cls: MagicMock) -> None
     ]
 
 
+_ECHO = json.dumps([{"title": "AI Meetup", "venue": "Vancouver", "description": "d", "tags": []}])
+
+
+@patch("main.anthropic.Anthropic")
+def test_summary_echo_is_retried(anthropic_cls: MagicMock) -> None:
+    client = _client(
+        _message(_ECHO, output=30),
+        _message(json.dumps([{"title": "AI Meetup", "summary": "s"}]), output=20),
+    )
+    anthropic_cls.return_value = client
+
+    filtered, _, usage = main.filter_events_with_llm(
+        [_event("AI Meetup")], ["AI"], "tech", "key", "deepseek-v4-pro"
+    )
+
+    assert client.messages.stream.call_count == 2
+    assert [fe.summary for fe in filtered] == ["s"]
+    assert usage.warnings == []
+
+
+@patch("main.anthropic.Anthropic")
+def test_summary_echo_twice_keeps_events_and_flags_them(anthropic_cls: MagicMock) -> None:
+    client = _client(_message(_ECHO), _message(_ECHO))
+    anthropic_cls.return_value = client
+
+    filtered, _, usage = main.filter_events_with_llm(
+        [_event("AI Meetup")], ["AI"], "tech", "key", "deepseek-v4-pro"
+    )
+
+    assert client.messages.stream.call_count == 2
+    assert [fe.event.title for fe in filtered] == ["AI Meetup"]
+    assert usage.warnings == ["1 approved event(s) came back with no summary: AI Meetup"]
+
+
+def test_summary_prompt_ends_with_instructions() -> None:
+    prompt = main.build_summary_prompt([_event("AI Meetup", "x" * 500)])
+    assert prompt.startswith("Events:")
+    assert prompt.rstrip().endswith("no extra text.")
+
+
 # ---------------------------------------------------------------------------
 # Parsing and title matching
 # ---------------------------------------------------------------------------
