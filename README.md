@@ -26,6 +26,29 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 | `tech` | Luma community calendars (`tech_luma_calendars`) | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
 | `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 08:05 UTC (Sun 00:05 PST / 01:05 PDT) — every other week (next: Nov 15, 2026); manual triggers always run | Fun events |
 
+### Keywords
+
+Each profile's keywords live in `config.json` (`tech_keywords`, `fun_keywords`); that file is the source of truth if this list drifts.
+
+| Profile | Keywords |
+|---------|----------|
+| `tech` | AI, Machine Learning, Startup, Data Science, Analytics, Product Management, Notion, Claude, OpenAI, Google, artificial intelligence |
+| `fun` | Film Noir, Restored Classic, World Cinema, Jazz, Classical Music, Concert, Theatre, Avant-garde, Criterion Collection, Art House Cinema, Ballet, Tango, Feminism |
+
+Keywords are used twice:
+
+1. **Pre-filter.** An event whose title, description, or tags contain a keyword as a whole word (case-insensitive; a plural "s"/"es" also counts) is accepted without LLM judging and only gets a summary. "AI" matches "AI-assisted" but not "painting". The venue is not searched, so "Chan Shun Concert Hall" doesn't match "Concert".
+2. **LLM filter.** Every other event goes to the LLM, which keeps it if it relates to any keyword, including partial or implied matches. The `tech` prompt errs on the side of inclusion; the `fun` prompt asks for genuine artistic merit or clear keyword alignment.
+
+### Date and time conditions
+
+| Profile | Date window | Time / day condition | Location |
+|---------|-------------|----------------------|----------|
+| `tech` | Two weeks: the next Monday through the Sunday 13 days later | None — any day, any time | Metro Vancouver only (Luma events outside the bounding box, e.g. Seoul or Nanaimo, are dropped). Postponed or cancelled events are dropped. |
+| `fun` | Same two-week window | Friday from 6:00 PM, or any time Saturday or Sunday. Monday–Thursday events are dropped, and so are Friday events with no listed time. | The three Vancouver venues only |
+
+The window always starts on the Monday after the run date, so a Saturday-night `tech` run covers the following Monday through Sunday a week later. Times are Vancouver local time.
+
 ## Running locally
 
 ```bash
