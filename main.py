@@ -295,9 +295,11 @@ def run_fetchers(
 # Step 3: LLM filtering via DeepSeek (Anthropic-compatible API)
 # ---------------------------------------------------------------------------
 
-_VENUE_HINT = (
+_GROUNDING_RULES = (
     "Use each event's venue to tell what kind of event it is: an event at a cinema "
-    "is a film screening, even if its title sounds like a concert or a play."
+    "is a film screening, even if its title sounds like a concert or a play. Never "
+    "guess what an event is about from its title: base every judgment and summary on "
+    "the description, the tags, or facts you know for certain about that specific work."
 )
 
 
@@ -337,9 +339,12 @@ def build_filter_prompt(events: list[Event], keywords: list[str]) -> str:
     keywords_str = ", ".join(f'"{k}"' for k in keywords)
 
     return f"""Your task:
-1. Review the list of events below. {_VENUE_HINT}
+1. Review the list of events below. {_GROUNDING_RULES}
 2. For each event, decide if it is relevant to ANY of these keywords: {keywords_str}.
    - Be inclusive: partial matches, related themes, and implied relevance all count.
+   - The venue alone is not a match: a film at an art-house cinema still needs its
+     own description or known content to fit a keyword. If an event has no
+     description and you don't know the specific work, leave it out.
 3. For each RELEVANT event, write a one- or two-sentence recommendation explaining
    why someone interested in those topics should attend.
 4. Return a JSON array. Include ONLY relevant events. Each object must have:
@@ -379,7 +384,7 @@ def build_summary_prompt(events: list[Event]) -> str:
     Returns:
         A prompt string asking the LLM only to write summaries, not to filter.
     """
-    return f"""These events are already confirmed relevant. For each, write a one- or two-sentence recommendation explaining why someone interested should attend. {_VENUE_HINT}
+    return f"""These events are already confirmed relevant. For each, write a one- or two-sentence recommendation explaining why someone interested should attend. {_GROUNDING_RULES}
 
 Return a JSON array where each object has:
 - "title": string (exact title from input)
@@ -819,6 +824,13 @@ def format_slack_message(
                 f":rotating_light: *{r.name}* — "
                 f"0 events returned | raw={r.raw_count} | *CHECK IMMEDIATELY*"
             )
+        else:
+            missing = sum(1 for e in r.events if not e.description)
+            if missing * 2 > len(r.events):
+                issue_lines.append(
+                    f":warning: *{r.name}* — {missing} of {len(r.events)} event(s) have no "
+                    "description, so the LLM may reject them. Check the event page layout."
+                )
     if llm_usage:
         issue_lines.extend(f":warning: *LLM* — {w}" for w in llm_usage.warnings)
         if llm_usage.cost_usd > _COST_ALARM_USD:

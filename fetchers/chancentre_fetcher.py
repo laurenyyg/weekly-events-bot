@@ -3,7 +3,7 @@ Chan Centre for the Performing Arts event fetcher.
 
 Scrapes upcoming events from https://chancentre.com/events/ using
 requests + BeautifulSoup.  Only text data is extracted (titles, dates,
-times, locations, URLs) — all images are ignored.
+times, locations, URLs, descriptions) — all images are ignored.
 """
 
 import logging
@@ -13,7 +13,7 @@ from datetime import date, datetime
 import requests
 from bs4 import BeautifulSoup
 
-from .base import BaseEventFetcher, Event
+from .base import BaseEventFetcher, Event, fill_descriptions
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,38 @@ def parse_chancentre_html(html: str, start_date: date, end_date: date) -> tuple[
     return events, raw_count
 
 
+_NON_DESCRIPTION_CLASSES = {"section", "mobile-event-tickets"}
+
+
+def parse_chancentre_description(html: str) -> str:
+    """Return an event page's description text.
+
+    Uses the meta description when present (most pages lack one), otherwise
+    the elements directly under the main content column, minus the title block
+    and the ticket box (which holds the membership promo). The description
+    itself may be <p> tags (sometimes with editor classes like "p1") or a <div>.
+
+    Args:
+        html: Raw HTML of a chancentre.com event page.
+
+    Returns:
+        The description text, or "" if none is found.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    meta = soup.find("meta", attrs={"name": "description"})
+    if meta and meta.get("content", "").strip():
+        return meta["content"].strip()
+    content = soup.select_one("div.layout-sidebar--content")
+    if not content:
+        return ""
+    parts = (
+        el.get_text(" ", strip=True)
+        for el in content.find_all(True, recursive=False)
+        if not _NON_DESCRIPTION_CLASSES & set(el.get("class", []))
+    )
+    return " ".join(p for p in parts if p)
+
+
 class ChanCentreFetcher(BaseEventFetcher):
     """Fetches upcoming events from chancentre.com/events/."""
 
@@ -172,9 +204,9 @@ class ChanCentreFetcher(BaseEventFetcher):
     def fetch_events(self, start_date: date, end_date: date) -> list[Event]:
         """Scrape Chan Centre events between start_date and end_date (inclusive).
 
-        Makes a single HTTP GET request to the events listing page and parses
-        the HTML with BeautifulSoup.  Only text content is extracted; all
-        images are ignored.
+        Makes one HTTP GET request to the events listing page, then one per
+        in-range event page for its description.  Only text content is
+        extracted; all images are ignored.
 
         Args:
             start_date: First day of the range (Monday of the upcoming week).
@@ -189,6 +221,7 @@ class ChanCentreFetcher(BaseEventFetcher):
 
         events, raw_count = parse_chancentre_html(resp.text, start_date, end_date)
         self.raw_count = raw_count
+        fill_descriptions(events, parse_chancentre_description, _HEADERS, self.name)
 
         logger.info(
             "[ChanCentre] raw=%d  in-range=%d  for %s → %s",

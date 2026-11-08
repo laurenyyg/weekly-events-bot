@@ -18,11 +18,14 @@
   - `tech` → `[LumaFetcher()]`
   - `fun`  → `[ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]`
 - Credentials via `os.getenv` only. Never hardcode.
+- Listing pages without descriptions (Cinematheque, ChanCentre) call `fill_descriptions()` from `fetchers/base.py`: one GET per unique detail URL, parsed by a per-site `parse_<site>_description(html)`, capped at 500 chars. A failed page is logged and leaves `""`. Part B warns when over half of a fetcher's events have no description.
+- VIFF: the listing is paginated (`/whats-on/page/N/`) and cards show only a few dates ("View N more dates" → `#book`). `ViffFetcher` reads every page, then replaces those films' card dates with the full list from the film page. A failed listing page fails the fetcher; a failed film page keeps the card dates.
 
 ## LLM Configuration
 - **Provider**: DeepSeek only, via its Anthropic-compatible endpoint (`DEEPSEEK_BASE_URL` in `main.py`) using the `anthropic` SDK. Key: `DEEPSEEK_API_KEY`. Never use Claude model IDs — DeepSeek silently remaps `claude-*` names to its own models instead of erroring.
 - **Model**: one per profile in `config.json` (currently `deepseek-v4-pro` for both; fallback `deepseek-v4-pro`), used for **both** LLM calls. Allowed IDs are the keys of `_DEEPSEEK_PRICING`; anything else exits at startup. Don't move the filter call to `deepseek-flash` without comparing recall first.
-- **Prompt payload**: `_slim_events_json` sends title, venue, description, tags. Venue tells the model the event type (Cinematheque has no descriptions). The keyword pre-filter must not search venue — "Chan Shun Concert Hall" would match "Concert".
+- **Prompt payload**: `_slim_events_json` sends title, venue, description, tags. Venue tells the model the event type. The keyword pre-filter must not search venue — "Chan Shun Concert Hall" would match "Concert".
+- **No title guessing**: `_GROUNDING_RULES` (in both prompts) forbids judging or summarizing an event from its title alone; the venue alone is not a keyword match. This only works if events have descriptions — see below.
 - **Summary-only call** (keyword-matched events): thinking must be explicitly `{"type": "disabled"}` — DeepSeek thinks by default.
 - **Filter+summary call**: `{"type": "enabled"}` (improves recall). DeepSeek ignores `budget_tokens` and treats `adaptive` as `enabled`; `max_tokens` caps thinking + answer together.
 - **Prompt caching**: automatic on DeepSeek; no `cache_control` markup. Both calls share the system prompt prefix and model, so the second call can hit the cache.

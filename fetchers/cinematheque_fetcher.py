@@ -13,7 +13,7 @@ from datetime import date, datetime
 import requests
 from bs4 import BeautifulSoup
 
-from .base import BaseEventFetcher, Event
+from .base import BaseEventFetcher, Event, fill_descriptions
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,23 @@ def parse_cinematheque_html(
     return events, raw_count
 
 
+def parse_cinematheque_description(html: str) -> str:
+    """Return a film page's one-sentence synopsis from its meta description.
+
+    Args:
+        html: Raw HTML of a thecinematheque.ca film page.
+
+    Returns:
+        The synopsis text, or "" if the page has none.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for attrs in ({"name": "description"}, {"property": "og:description"}):
+        meta = soup.find("meta", attrs=attrs)
+        if meta and meta.get("content", "").strip():
+            return meta["content"].strip()
+    return ""
+
+
 class CinemathequeFetcher(BaseEventFetcher):
     """Fetches film screenings from thecinematheque.ca calendar."""
 
@@ -140,8 +157,9 @@ class CinemathequeFetcher(BaseEventFetcher):
     def fetch_events(self, start_date: date, end_date: date) -> list[Event]:
         """Scrape Cinematheque calendar for screenings between start_date and end_date.
 
-        Makes a single HTTP GET to the calendar page and parses the day-by-day
-        listing.  Location is always The Cinematheque (1131 Howe Street).
+        Makes one HTTP GET to the calendar page and parses the day-by-day
+        listing, then one GET per unique film page for its synopsis.
+        Location is always The Cinematheque (1131 Howe Street).
 
         Args:
             start_date: First day of the range.
@@ -156,6 +174,7 @@ class CinemathequeFetcher(BaseEventFetcher):
 
         events, raw_count = parse_cinematheque_html(resp.text, start_date, end_date)
         self.raw_count = raw_count
+        fill_descriptions(events, parse_cinematheque_description, _HEADERS, self.name)
 
         logger.info(
             "[Cinematheque] raw=%d  in-range=%d  for %s → %s",

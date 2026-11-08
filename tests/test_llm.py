@@ -315,13 +315,32 @@ def test_prompts_include_venue() -> None:
     clowns.location = "The Cinematheque, 1131 Howe Street, Vancouver"
     for prompt in (main.build_filter_prompt([clowns], ["Theatre"]), main.build_summary_prompt([clowns])):
         assert '"venue": "The Cinematheque, 1131 Howe Street, Vancouver"' in prompt
-        assert main._VENUE_HINT in prompt
+        assert main._GROUNDING_RULES in prompt
 
 
 def test_venue_does_not_trigger_keyword_match() -> None:
     event = _event("UBC Bands")
     event.location = "Chan Shun Concert Hall"
     assert not main._matches_any_keyword(event, ["Concert"])
+
+
+def _render_fetcher(events: list[Event]) -> str:
+    result = main.FetcherResult(name="Cinematheque", success=True, events=events, raw_count=len(events))
+    payload = main.format_slack_message(
+        [], [result], date(2026, 11, 9), date(2026, 11, 22), "deepseek-v4-pro", ["AI"], "fun",
+        main.LLMUsage(model_id="deepseek-v4-pro"), None,
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def test_mostly_missing_descriptions_flagged() -> None:
+    text = _render_fetcher([_event("A"), _event("B"), _event("C", "A Dutch drama.")])
+    assert ":warning: *Cinematheque* — 2 of 3 event(s) have no description" in text
+
+
+def test_few_missing_descriptions_not_flagged() -> None:
+    text = _render_fetcher([_event("A"), _event("B", "x"), _event("C", "y")])
+    assert "have no description" not in text
 
 
 def test_cost_alarm_and_low_balance_flagged() -> None:
