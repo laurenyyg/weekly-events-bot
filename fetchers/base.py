@@ -24,6 +24,7 @@ class Event:
     url: str
     source: str         # Name of the fetcher that produced this event
     tags: list[str] = field(default_factory=list)
+    pre_approved: bool = False  # source is on-topic by definition; skip keyword matching
 
     def to_dict(self) -> dict:
         return {

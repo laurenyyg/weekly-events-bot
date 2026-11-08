@@ -167,6 +167,23 @@ def test_calls_use_deepseek_and_correct_thinking(anthropic_cls: MagicMock) -> No
 
 
 @patch("main.anthropic.Anthropic")
+def test_pre_approved_event_skips_keyword_filter(anthropic_cls: MagicMock) -> None:
+    event = _event("Prompting Workshop")
+    event.pre_approved = True
+    client = _client(_message(json.dumps([{"title": "Prompting Workshop", "summary": "s"}])))
+    anthropic_cls.return_value = client
+
+    filtered, _, usage = main.filter_events_with_llm(
+        [event], ["Startup"], "tech", "key", "deepseek-v4-pro"
+    )
+
+    assert client.messages.stream.call_count == 1
+    assert client.messages.stream.call_args.kwargs["thinking"] == {"type": "disabled"}
+    assert [fe.summary for fe in filtered] == ["s"]
+    assert (usage.keyword_matched, usage.llm_judged) == (1, 0)
+
+
+@patch("main.anthropic.Anthropic")
 def test_silent_drops_become_warnings(anthropic_cls: MagicMock) -> None:
     events = [_event("AI Meetup"), _event("AI Workshop"), _event("Pottery Night")]
     anthropic_cls.return_value = _client(
@@ -403,7 +420,7 @@ def test_keyword_matches_whole_word(text: str, keyword: str) -> None:
 def test_part_b_shows_keyword_and_llm_split() -> None:
     usage = main.LLMUsage(model_id="deepseek-v4-pro", keyword_matched=1, llm_judged=12)
     text = json.dumps(_render(usage), ensure_ascii=False)
-    assert "*Keyword-matched:* 1 · *LLM-judged:* 12  →  *LLM approved:* 0" in text
+    assert "*Auto-included:* 1 · *LLM-judged:* 12  →  *LLM approved:* 0" in text
 
 
 def _render_fetcher(events: list[Event]) -> str:
@@ -440,7 +457,8 @@ def test_tech_footer_has_calendar_discovery_reminder() -> None:
     )
     text = json.dumps(payload, ensure_ascii=False)
     count = len(main._CONFIG["tech_luma_calendars"])
-    assert f"Events come only from the {count} Luma calendars" in text
+    assert f"Events come from the {count} Luma calendars" in text
+    assert "Cerebral Valley's remote AI events" in text
     assert "To discover more" in text
 
 

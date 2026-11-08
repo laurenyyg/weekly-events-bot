@@ -23,7 +23,7 @@ A weekly Slack digest of curated Vancouver events, filtered by an LLM for releva
 
 | Profile | Sources | Schedule | Slack channel |
 |---------|---------|----------|---------------|
-| `tech` | Luma community calendars (`tech_luma_calendars`) | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
+| `tech` | Luma community calendars (`tech_luma_calendars`), Cerebral Valley remote AI events | Every Sunday 04:00 UTC (Sat 9:00 PM PDT) — automated, manual trigger also available | Tech events |
 | `fun` | Chan Centre, VIFF, Cinematheque | Every Sunday 08:05 UTC (Sun 00:05 PST / 01:05 PDT) — every other week (next: Nov 15, 2026); manual triggers always run | Fun events |
 
 ### Keywords
@@ -40,11 +40,14 @@ Keywords are used twice:
 1. **Pre-filter.** An event whose title, description, or tags contain a keyword as a whole word (case-insensitive; a plural "s"/"es" also counts) is accepted without LLM judging and only gets a summary. "AI" matches "AI-assisted" but not "painting". The venue is not searched, so "Chan Shun Concert Hall" doesn't match "Concert".
 2. **LLM filter.** Every other event goes to the LLM, which keeps it if it relates to any keyword, including partial or implied matches. The `tech` prompt errs on the side of inclusion; the `fun` prompt asks for genuine artistic merit or clear keyword alignment.
 
+Cerebral Valley events skip both steps: every event there is AI-related, so they are marked pre-approved and only get a summary. Part B's "Auto-included" count covers keyword matches plus pre-approved events.
+
 ### Date and time conditions
 
 | Profile | Date window | Time / day condition | Location |
 |---------|-------------|----------------------|----------|
-| `tech` | Two weeks: the next Monday through the Sunday 13 days later | None — any day, any time | Metro Vancouver only (Luma events outside the bounding box, e.g. Seoul or Nanaimo, are dropped). Postponed or cancelled events are dropped. |
+| `tech` (Luma) | Two weeks: the next Monday through the Sunday 13 days later | None — any day, any time | Metro Vancouver only (Luma events outside the bounding box, e.g. Seoul or Nanaimo, are dropped). Postponed or cancelled events are dropped. |
+| `tech` (Cerebral Valley) | Same two-week window; events that started before it (ongoing hackathons) are dropped | Must start between 10:00 AM and 8:00 PM, inclusive; how long it runs doesn't matter | Remote only (`locations=REMOTE`); listings with location "Other" are dropped because they have turned out to be in-person |
 | `fun` | Same two-week window | Friday from 6:00 PM, or any time Saturday or Sunday. Monday–Thursday events are dropped, and so are Friday events with no listed time. | The three Vancouver venues only |
 
 The window always starts on the Monday after the run date, so a Saturday-night `tech` run covers the following Monday through Sunday a week later. Times are Vancouver local time.

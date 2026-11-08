@@ -15,8 +15,10 @@
 ## Architecture
 - All fetchers live in `fetchers/` and inherit from `BaseEventFetcher`.
 - Fetchers are assembled at runtime by `load_profile_config()` — not a static global:
-  - `tech` → one `LumaFetcher(name, calendar_id)` per entry in `config.json` → `tech_luma_calendars`
+  - `tech` → one `LumaFetcher(name, calendar_id)` per entry in `config.json` → `tech_luma_calendars`, then `CerebralValleyFetcher()`
   - `fun`  → `[ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]`
+- Cerebral Valley: reads `api.cerebralvalley.ai/v1/public/event/pull` (the undocumented API behind cerebralvalley.ai/events; no key) with `approved=true&locations=REMOTE&startDateTime=…&endDateTime=…` (ISO UTC), paging `limit`/`offset` until `lastPage`. Vancouver isn't a supported location, so only remote events are pulled. `startDateTime` is UTC as `YYYY-MM-DD HH:MM:SS`, ignore the `timeZone` field. The API also returns events that began before the window (ongoing hackathons) — dropped. `location: "Other"` listings have turned out to be in-person elsewhere — dropped. Kept events must start 10:00–20:00 Vancouver time (inclusive; duration ignored) and are marked `Event.pre_approved`.
+- `Event.pre_approved`: set by sources whose events are all on-topic. Stage 1 sends them to the summary-only call with keyword-matched events, so they're never judged or rejected by the LLM.
 - Luma: each calendar's iCal feed is `api2.luma.com/ics/get?entity=calendar&id=cal-…`. The `cal-…` ID is in the calendar page's HTML (`luma.com/<slug>`). An event on a host's "Personal" calendar has no slug, but its event page shows that calendar's ID, which works the same way. Events outside the Metro Vancouver bounding box (from GEO) and events marked postponed/cancelled (in STATUS or the title) are dropped. Calendar feeds omit the description body (only URL, address, hosts), so `LumaFetcher` calls `fill_descriptions()` with `parse_luma_description()`, which reads `description_mirror` from the event page's `__NEXT_DATA__` and falls back to the truncated meta description. Don't use the `luma.com/vancouver` discover feed — it lists only Luma's featured picks, mostly social events.
 - A download or parse failure raises, so Part B shows the calendar as FAILED. A calendar whose feed loads but has nothing in the window sets `empty_ok` and shows as a `:white_circle:` line, not an alert; only an empty feed triggers the 0-events alert.
 - Credentials via `os.getenv` only. Never hardcode.
@@ -51,11 +53,11 @@
   ```
 - Part A is sorted by date, then time (`TBD` last within its day). Repeat showings of the same title merge into one entry: one `:date:` line per showing, then the earliest showing's summary.
 - Three parts: **Part A** (curated events), **Part B** (diagnostics), **footer** (metadata).
-- Part B's funnel line shows `Keyword-matched: N · LLM-judged: M` before `LLM approved`, so a pre-filter that matches too much is visible at a glance.
+- Part B's funnel line shows `Auto-included: N · LLM-judged: M` before `LLM approved` (Auto-included = keyword matches + pre-approved events), so a pre-filter that matches too much is visible at a glance.
 - Footer format: `:robot_face: \`[model_id]\` | Tokens: [total] (in [miss] · cached [hit] · out [output]) | Est. cost: $[usd] ([off-peak/peak]) | Budget: [OK/Hit] | Balance: $[usd]`
   - All counts sum both calls. `out` includes thinking tokens. Cost is an estimate from list prices. Balance is omitted if it couldn't be fetched.
 - Every issue (failed or 0-event fetcher, LLM warning, cost alarm, low balance) is one line in Part B. When there are any, a `:warning: *N issue(s) this run — see Part B.*` banner sits under the header, and the payload's top-level `text` (used for Slack notifications) says the same.
-- Tech profile footer also notes that events come only from the configured Luma calendars (with the count) and reminds the reader how to discover more: browse luma.com/vancouver or a liked event, open the host's calendar page, add its `cal-…` ID.
+- Tech profile footer also notes that events come from the configured Luma calendars (with the count) plus Cerebral Valley's remote AI events, and reminds the reader how to discover more: browse luma.com/vancouver or a liked event, open the host's calendar page, add its `cal-…` ID.
 - Language: professional, concise, English only.
 
 ## Testing & Validation

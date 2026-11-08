@@ -38,6 +38,7 @@ import os
 
 from fetchers import (
     BaseEventFetcher,
+    CerebralValleyFetcher,
     ChanCentreFetcher,
     CinemathequeFetcher,
     Event,
@@ -147,6 +148,7 @@ def load_profile_config(profile: str) -> tuple[str, str, list[str], list[BaseEve
             LumaFetcher(name, calendar_id)
             for name, calendar_id in _CONFIG.get("tech_luma_calendars", {}).items()
         ]
+        fetchers.append(CerebralValleyFetcher())
     else:  # fun
         webhook_url = os.getenv("FUN_WEBHOOK_URL", "")
         fetchers = [ChanCentreFetcher(), ViffFetcher(), CinemathequeFetcher()]
@@ -233,7 +235,7 @@ class LLMUsage:
     cost_usd: float = 0.0
     off_peak: bool = True
     retries: int = 0
-    keyword_matched: int = 0       # took the summary-only shortcut
+    keyword_matched: int = 0       # took the summary-only shortcut (keyword match or pre-approved)
     llm_judged: int = 0            # sent to the filter call
     warnings: list[str] = field(default_factory=list)
 
@@ -665,12 +667,15 @@ def filter_events_with_llm(
         usage.retries += retries
 
     # Stage 1: keyword pre-filter — split into confirmed-relevant vs ambiguous.
-    keyword_matched = [e for e in events if _matches_any_keyword(e, keywords)]
-    unmatched = [e for e in events if not _matches_any_keyword(e, keywords)]
+    # Pre-approved events (from all-on-topic sources) skip matching entirely.
+    keyword_matched: list[Event] = []
+    unmatched: list[Event] = []
+    for e in events:
+        (keyword_matched if e.pre_approved or _matches_any_keyword(e, keywords) else unmatched).append(e)
     usage.keyword_matched = len(keyword_matched)
     usage.llm_judged = len(unmatched)
     log.info(
-        "Pre-filter: %d keyword-matched (summary only), %d unmatched (LLM filter).",
+        "Pre-filter: %d auto-included (summary only), %d unmatched (LLM filter).",
         len(keyword_matched), len(unmatched),
     )
 
@@ -1016,7 +1021,7 @@ def format_slack_message(
     approved = len(filtered_events)
 
     split = (
-        f"*Keyword-matched:* {llm_usage.keyword_matched} · "
+        f"*Auto-included:* {llm_usage.keyword_matched} · "
         f"*LLM-judged:* {llm_usage.llm_judged}  →  "
         if llm_usage else ""
     )
@@ -1089,8 +1094,9 @@ def format_slack_message(
         context_elements.append({
             "type": "mrkdwn",
             "text": (
-                f":information_source: Events come only from the {len(_CONFIG.get('tech_luma_calendars', {}))} "
-                "Luma calendars listed under `tech_luma_calendars` in config.json. "
+                f":information_source: Events come from the {len(_CONFIG.get('tech_luma_calendars', {}))} "
+                "Luma calendars listed under `tech_luma_calendars` in config.json, plus Cerebral "
+                "Valley's remote AI events (10 AM–8 PM starts). "
                 "To discover more, browse <https://luma.com/vancouver|luma.com/vancouver> or open a tech "
                 "event you liked, click its host to reach their calendar page, and add that calendar's "
                 "`cal-…` ID (in the page source) to config.json."
